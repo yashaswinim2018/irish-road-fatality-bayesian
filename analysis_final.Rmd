@@ -1,0 +1,606 @@
+---
+title: "Analysis Code -- Bayesian Ranking of Traffic Fatality Rates per Distance Travelled in Ireland (2015-2024)"
+author: "Sara Raees, Yashaswini Malleshwarppa"
+output:
+  pdf_document:
+    number_sections: true
+    fig_caption: true
+---
+
+This document contains the cleaned analysis code corresponding to the results presented in the accompanying report. Each section below reproduces one figure, table, or model fit from the paper, in the same order in which it appears there. The working directory must contain `road_accidents.csv` and `THA17.20251105T151118.csv`.
+
+# Setup
+
+Libraries and global options.
+
+```{r setup}
+knitr::opts_chunk$set(
+  echo=TRUE, warning=FALSE, message=FALSE,
+  fig.width=6.8, fig.height=4.0,
+  fig.align="center", fig.pos="!htbp",
+  out.width="0.94\\linewidth",
+  dpi=300
+)
+library(rjags); library(coda); library(dplyr); library(tidyr)
+library(ggplot2); library(stringr); library(ggrepel)
+library(viridis); library(knitr); library(lme4)
+library(patchwork); library(scales); library(sf); library(rnaturalearth)
+```
+
+# Data Sources and Data Preparation
+
+Loading and cleaning the RSA fatality data and CSO vehicle-kilometres-travelled (VKT) data, and constructing the county-year panel used throughout the analysis.
+
+```{r load-data}
+df1 <- read.csv("road_accidents.csv")
+df2 <- read.csv("THA17.20251105T151118.csv")
+
+acc_wide <- df1 %>%
+  filter(Statistic.Label %in% c("Persons Killed","Persons Injured"),
+         Year >= 2015, Year <= 2024) %>%
+  mutate(County=str_replace(County,"^Co\\.\\s*","")) %>%
+  select(Year,County,Statistic.Label,VALUE) %>%
+  pivot_wider(names_from=Statistic.Label,values_from=VALUE) %>%
+  rename(deaths=`Persons Killed`,injuries=`Persons Injured`)
+
+vmt <- df2 %>%
+  mutate(County=str_replace(County.of.Ownership,"^Co\\.\\s*","")) %>%
+  filter(Year>=2015,Year<=2024,
+         County.of.Ownership!="Ireland",
+         Type.of.Vehicle=="All vehicle types",
+         Year.of.Registration=="All years") %>%
+  transmute(Year,County,km=VALUE*1e6) %>%
+  mutate(VM=km/1e9)
+
+panel <- acc_wide %>%
+  left_join(vmt,by=c("Year","County")) %>%
+  filter(!is.na(VM),VM>0) %>%
+  mutate(
+    covid=ifelse(Year %in% c(2020,2021),1L,0L),
+    Year_c=Year-mean(Year,na.rm=TRUE),
+    county_id=as.integer(factor(County)),
+    rate_billion=deaths/VM
+  ) %>%
+  arrange(County,Year)
+
+X<-panel$deaths; VM_vec<-panel$VM; Year_c<-panel$Year_c
+covid<-panel$covid; county<-panel$county_id
+nObs<-nrow(panel); N<-length(unique(county))
+
+county_lookup <- panel %>%
+  select(County,county_id) %>% distinct() %>% arrange(county_id)
+saveRDS(county_lookup,"county_lookup.rds")
+saveRDS(panel,"panel.rds")
+
+road_data <- tribble(
+  ~County,~motorway_km,~dual_km,~single_km,~total_km,~area_km2,
+  "Carlow",23.533,0,54.329,77.862,897,
+  "Cavan",0,0,123.272,123.272,1932,
+  "Clare",31.631,19.546,181.546,232.723,3449,
+  "Cork",48.915,62.651,402.680,514.246,7500,
+  "Donegal",0,5.714,298.185,303.899,4861,
+  "Dublin",81.560,41.397,15.003,138.960,921,
+  "Galway",61.538,12.312,379.938,453.788,6148,
+  "Kerry",0,11.056,413.165,424.221,4807,
+  "Kildare",108.233,8.006,17.888,134.127,1693,
+  "Kilkenny",67.602,17.032,111.946,196.580,2073,
+  "Laois",66.979,0,101.508,168.487,1719,
+  "Leitrim",0,7.282,49.095,56.377,1590,
+  "Limerick",27.250,8.927,156.361,192.538,2756,
+  "Longford",0,0.156,96.618,96.774,1091,
+  "Louth",39.682,9.350,48.754,97.786,826,
+  "Mayo",0,0,397.316,397.316,5586,
+  "Meath",88.063,12.087,103.632,203.782,2342,
+  "Monaghan",0,15.222,88.478,103.700,1295,
+  "Offaly",14.684,0,101.247,115.931,2000,
+  "Roscommon",21.143,1.151,224.793,247.087,2544,
+  "Sligo",0,12.800,140.628,153.428,1836,
+  "Tipperary",121.973,3.294,210.023,335.290,4305,
+  "Waterford",0,9.690,97.061,106.751,1837,
+  "Westmeath",56.229,17.632,101.538,175.399,1840,
+  "Wexford",21.869,0,142.148,164.017,2353,
+  "Wicklow",35.327,18.332,38.146,91.805,2024
+) %>%
+  mutate(
+    pct_dual=(motorway_km+dual_km)/total_km*100,
+    pct_single=single_km/total_km*100,
+    pct_motorway=motorway_km/total_km*100,
+    road_density=total_km/area_km2
+  )
+```
+
+## Panel Summary
+
+Summary statistics for the final county-year panel.
+
+```{r panel-summary}
+kable(data.frame(
+  Statistic=c("Total observations","Counties","Years",
+               "Mean deaths/county/year","Variance of deaths",
+               "Variance/Mean ratio","COVID years","Zero deaths"),
+  Value=c(nObs,N,"2015 to 2023",
+          round(mean(X),2),round(var(X),2),
+          round(var(X)/mean(X),2),sum(covid),sum(X==0))
+), col.names=c("Statistic","Value"),
+caption="Panel dataset summary statistics.")
+```
+
+# Exploratory Data Analysis
+
+```{r fig-deaths}
+ggplot(acc_wide,aes(x=Year,y=deaths,color=County,group=County))+
+  geom_line(linewidth=0.7)+geom_point(size=1.2)+
+  scale_x_continuous(breaks=sort(unique(panel$Year)))+
+  labs(x="Year",y="Persons Killed")+
+  theme_minimal(base_size=10)+
+  theme(axis.text.x=element_text(angle=45,hjust=1),
+        legend.text=element_text(size=6),legend.key.size=unit(0.3,"cm"))
+```
+
+```{r fig-injuries}
+ggplot(acc_wide,aes(x=Year,y=injuries,color=County,group=County))+
+  annotate("rect", xmin=2020, xmax=2021, ymin=-Inf, ymax=Inf, fill="gray85", alpha=0.5) +
+  geom_line(linewidth=0.7)+geom_point(size=1.2)+
+  scale_x_continuous(breaks=sort(unique(panel$Year)))+
+  labs(x="Year",y="Persons Injured")+
+  theme_minimal(base_size=10)+
+  theme(axis.text.x=element_text(angle=45,hjust=1),
+        legend.text=element_text(size=6),legend.key.size=unit(0.3,"cm"))
+```
+
+```{r fig-national-rate}
+nat_rate <- panel %>% group_by(Year) %>%
+  summarise(td=sum(deaths,na.rm=TRUE),tk=sum(km,na.rm=TRUE),
+            rate=td/(tk/1e9),.groups="drop")
+ggplot(nat_rate,aes(x=Year,y=rate))+
+  geom_line(linewidth=1.2,color="#d73027")+
+  geom_point(size=2.5,color="#d73027")+
+  geom_vline(xintercept=2020,linetype="dashed",color="gray50")+
+  annotate("text",x=2020.2,y=max(nat_rate$rate)*0.96,
+           label="COVID",hjust=0,size=3,color="gray40")+
+  scale_x_continuous(breaks=sort(unique(panel$Year)))+
+  labs(x="Year",y="Deaths per billion km")+
+  theme_minimal(base_size=10)+
+  theme(axis.text.x=element_text(angle=45,hjust=1))
+```
+
+Heatmap of annual rates by county and year, and the average rate by county over the study period.
+
+```{r fig-combined-eda}
+library(patchwork)
+
+p1 <- ggplot(panel,aes(x=Year,y=County,fill=rate_billion))+
+  geom_tile(color="white",linewidth=0.2)+
+  scale_fill_viridis(option="C",name="Deaths per\nbillion km")+
+  scale_x_continuous(breaks=sort(unique(panel$Year)))+
+  labs(x="Year",y="County")+
+  theme_minimal(base_size=9)+
+  theme(axis.text.x=element_text(angle=45,hjust=1),
+        axis.text.y=element_text(size=7))
+
+avg_rate <- panel %>% group_by(County) %>%
+  summarise(avg_rate=mean(rate_billion,na.rm=TRUE),.groups="drop")
+
+p2 <- ggplot(avg_rate,aes(x=reorder(County,avg_rate),y=avg_rate))+
+  geom_col(fill="firebrick",alpha=0.85)+coord_flip()+
+  labs(x="County",y="Avg deaths per billion km")+
+  theme_minimal(base_size=9)
+
+p1 + p2 + plot_layout(ncol = 2) + plot_annotation(tag_levels = 'a')
+```
+
+# Statistical Methodology
+
+The main model: a Bayesian hierarchical Poisson regression (Model M3) fitted in JAGS, with vehicle-kilometres travelled as the exposure offset and a county-level random intercept capturing baseline risk. The national time trend and COVID-19 effect are modelled as global fixed effects.
+
+```{r run-jags}
+jags_data <- list(X=X,VM=VM_vec,Year_c=Year_c,
+                  covid=covid,county=county,nObs=nObs,N=N)
+model_string <- "
+model {
+  for (i in 1:nObs) {
+    X[i] ~ dpois(mu[i])
+    log(mu[i]) <- log(VM[i]) +
+                  (beta0 + b0[county[i]]) +
+                  beta1 * Year_c[i] +
+                  beta2 * covid[i]
+  }
+  for (c in 1:N) {
+    b0[c] ~ dnorm(0, tau0)
+  }
+  beta0 ~ dnorm(1.200, 9.905)
+  beta1 ~ dnorm(-0.002, 84.665)
+  beta2 ~ dnorm( 0.053,  1.989)
+  tau0 ~ dgamma(0.001, 0.001)
+  sd0 <- 1/sqrt(tau0)
+}
+"
+m_main <- jags.model(textConnection(model_string),
+                      data=jags_data,n.chains=4,n.adapt=1000)
+update(m_main,5000)
+samp <- coda.samples(m_main,
+  variable.names=c("beta0","beta1","beta2","b0","sd0"),
+  n.iter=20000)
+saveRDS(samp,"posterior_informed_priors.rds")
+pm <- as.matrix(samp)
+```
+
+## Posterior Summary
+
+Posterior mean and 95% credible interval for the global parameters.
+
+```{r posterior-table}
+ps <- c("beta0","beta1","beta2","sd0")
+pt <- data.frame(
+  Parameter=c("$\\beta_0$","$\\beta_1$","$\\beta_2$","$\\sigma_0$"),
+  Meaning=c("National baseline log-rate","National time trend",
+            "National COVID effect","County baseline SD"),
+  Mean=sapply(ps,function(p)round(mean(pm[,p]),4)),
+  L95=sapply(ps,function(p)round(quantile(pm[,p],0.025),4)),
+  U95=sapply(ps,function(p)round(quantile(pm[,p],0.975),4)),
+  Pgt0=sapply(ps,function(p)round(mean(pm[,p]>0),4)),
+  Sig=sapply(ps,function(p){
+    lo<-quantile(pm[,p],0.025);hi<-quantile(pm[,p],0.975)
+    ifelse(lo>0|hi<0,"YES","NO")})
+)
+kable(pt,row.names=FALSE,col.names=c("Parameter","Meaning","Post. Mean",
+                     "Lower 95% CrI","Upper 95% CrI","P(>0)","Different from 0?"),
+      caption="Posterior summary of global parameters.")
+```
+
+# MCMC Convergence Diagnostics
+
+Trace plots for all four chains.
+
+```{r fig-trace}
+samp2<-readRDS("posterior_informed_priors.rds")
+pm2<-as.matrix(samp2); n_iter<-nrow(pm2)/4
+params<-c("beta0","beta1","beta2","sd0")
+cols4<-c("blue","red","darkgreen","purple")
+main_titles <- list(
+  beta0 = expression("Trace: " * beta[0]),
+  beta1 = expression("Trace: " * beta[1]),
+  beta2 = expression("Trace: " * beta[2]),
+  sd0 = expression("Trace: " * sigma[0])
+)
+ylabels <- list(
+  beta0 = expression(beta[0]),
+  beta1 = expression(beta[1]),
+  beta2 = expression(beta[2]),
+  sd0 = expression(sigma[0])
+)
+par(mfrow=c(2,2),mar=c(3,3,2,1))
+for(p in params){
+  ad<-pm2[,p]
+  ch<-lapply(1:4,function(i)ad[((i-1)*n_iter+1):(i*n_iter)])
+  plot(ch[[1]],type="l",col=cols4[1],main=main_titles[[p]],
+       xlab="Iter",ylab=ylabels[[p]],ylim=range(ad))
+  for(i in 2:4)lines(ch[[i]],col=cols4[i])
+  legend("topright",legend=paste("Chain",1:4),col=cols4,lwd=1,cex=0.4,bty="n")
+}
+```
+
+Density plots with the four chains shown separately.
+
+```{r fig-density}
+density_titles <- list(
+  beta0 = expression("Density: " * beta[0]),
+  beta1 = expression("Density: " * beta[1]),
+  beta2 = expression("Density: " * beta[2]),
+  sd0 = expression("Density: " * sigma[0])
+)
+par(mfrow=c(4,1),mar=c(3,3,2,1))
+for(p in params){
+  ad<-pm2[,p]
+  ch<-lapply(1:4,function(i)ad[((i-1)*n_iter+1):(i*n_iter)])
+  dl<-lapply(ch,density)
+  xlim<-range(sapply(dl,function(d)range(d$x)))
+  ylim<-range(sapply(dl,function(d)range(d$y)))
+  plot(dl[[1]],col=cols4[1],lwd=2,main=density_titles[[p]],
+       xlab=ylabels[[p]],xlim=xlim,ylim=ylim)
+  for(i in 2:4)lines(dl[[i]],col=cols4[i],lwd=2)
+  abline(v=0,col="black",lty=3)
+  legend("topright",legend=paste("Chain",1:4),col=cols4,lwd=1.5,cex=0.4,bty="n")
+}
+```
+
+## Formal Convergence Statistics
+
+Gelman-Rubin R-hat and effective sample size.
+
+```{r convergence-table}
+gd<-gelman.diag(samp2); es<-effectiveSize(samp2)
+ct<-data.frame(Parameter=c("$\\beta_0$","$\\beta_1$","$\\beta_2$","$\\sigma_0$"),
+               Rhat=round(gd$psrf[params,1],4),
+               Rhat_UCI=round(gd$psrf[params,2],4),
+               ESS=round(es[params]),
+               Pass=ifelse(gd$psrf[params,1]<1.05&es[params]>1000,"YES","CHECK"))
+kable(ct,row.names=FALSE,col.names=c("Parameter","R-hat","R-hat UCI","ESS","Passed?"),
+      caption="Formal convergence diagnostics. All R-hat below 1.05 and ESS above 1000.")
+```
+
+## Prior vs Posterior Comparison
+
+```{r fig-prior-post}
+set.seed(123); ns<-80000
+b0p<-rnorm(ns,1.200,1/sqrt(9.905))
+b1p<-rnorm(ns,-0.002,1/sqrt(84.665))
+b2p<-rnorm(ns,0.053,1/sqrt(1.989))
+prior_post_titles <- list(
+  beta0 = expression(beta[0]),
+  beta1 = expression(beta[1]),
+  beta2 = expression(beta[2])
+)
+par(mfrow=c(1,3),mar=c(4,3,3,1))
+for(i in 1:3){
+  param<-c("beta0","beta1","beta2")[i]
+  pv<-list(b0p,b1p,b2p)[[i]]
+  pov<-pm2[,param]
+  pv_dens <- density(pv)
+  pov_dens <- density(pov)
+  xl<-quantile(c(pv,pov),c(0.001,0.999))
+  yl<-range(c(pv_dens$y,pov_dens$y))
+  plot(pv_dens,col="red",lwd=2,main=prior_post_titles[[param]],xlab=prior_post_titles[[param]],xlim=xl,ylim=yl)
+  lines(pov_dens,col="blue",lwd=2)
+  abline(v=0,lty=3)
+  legend("topright",legend=c("Prior","Posterior"),col=c("red","blue"),lwd=2,cex=0.65)
+}
+```
+
+## Prior Predictive Check
+
+```{r prior-pred}
+set.seed(123); ns2<-1000
+pp<-matrix(NA,nrow=ns2,ncol=nObs)
+sd0_val <- mean(pm2[,"sd0"])
+for(s in 1:ns2){
+  b0s<-rnorm(N,0,sd0_val)
+  beta0s<-rnorm(1,1.200,1/sqrt(9.905))
+  beta1s<-rnorm(1,-0.002,1/sqrt(84.665))
+  beta2s<-rnorm(1,0.053,1/sqrt(1.989))
+  lmu<-log(VM_vec)+(beta0s+b0s[county])+beta1s*Year_c+beta2s*covid
+  pp[s,]<-rpois(nObs,pmin(exp(lmu),1000))
+}
+plo<-apply(pp,2,quantile,0.025,na.rm=TRUE)
+phi<-apply(pp,2,quantile,0.975,na.rm=TRUE)
+coverage<-mean(X>=plo&X<=phi,na.rm=TRUE)
+```
+
+# Bayesian Ranking Methodology
+
+Computing the posterior rank distribution, relative risk, and pairwise comparison probabilities for each county.
+
+```{r ranking-compute}
+samp3<-readRDS("posterior_informed_priors.rds")
+pm3<-as.matrix(samp3); cl<-readRDS("county_lookup.rds")
+b0c<-grep("^b0\\[",colnames(pm3),value=TRUE)
+b0s<-pm3[,b0c]
+rm_mat<-t(apply(b0s,1,function(x)rank(-x)))
+rr<-data.frame(
+  County=cl$County,mb0=colMeans(b0s),
+  lb0=apply(b0s,2,quantile,0.025),ub0=apply(b0s,2,quantile,0.975),
+  mr=colMeans(rm_mat),lr=apply(rm_mat,2,quantile,0.025),
+  ur=apply(rm_mat,2,quantile,0.975),
+  ph=colMeans(b0s>0),pl=colMeans(b0s<0),
+  RR=exp(colMeans(b0s))/mean(exp(colMeans(b0s)))
+) %>%
+  mutate(Ev=case_when(pmax(ph,pl)>0.999~"Decisive",
+    pmax(ph,pl)>0.975~"Strong",pmax(ph,pl)>0.950~"Moderate",
+    pmax(ph,pl)>0.750~"Weak",TRUE~"None"),
+    Con=case_when(ph>0.975~"Significantly HIGHER RISK",
+      pl>0.975~"Significantly LOWER RISK",TRUE~"No significant difference")
+  ) %>% arrange(mb0)
+```
+
+# Results
+
+County baseline risk rankings (b0).
+
+```{r fig-rankings}
+ggplot(rr,aes(x=mb0,y=reorder(County,mb0),color=Con))+
+  geom_errorbarh(aes(xmin=lb0,xmax=ub0),height=0.3)+
+  geom_point(size=2)+
+  geom_vline(xintercept=0,linetype="dashed",color="gray50")+
+  scale_color_manual(values=c("Significantly HIGHER RISK"="red",
+    "Significantly LOWER RISK"="darkgreen",
+    "No significant difference"="gray50"),name="")+
+  labs(x="Posterior mean b0 with 95% credible interval",y="County")+
+  theme_minimal(base_size=9)+
+  theme(legend.position="bottom",axis.text.y=element_text(size=7))
+```
+
+Posterior credible intervals on the county risk ranks.
+
+```{r fig-rank-ci}
+ggplot(rr,aes(x=mr,y=reorder(County,-mr)))+
+  geom_errorbarh(aes(xmin=lr,xmax=ur),height=0.3,color="steelblue")+
+  geom_point(size=2,color="darkblue")+
+  geom_vline(xintercept=13.5,linetype="dashed",color="gray50")+
+  labs(x="Posterior mean rank with 95% credible interval",y="County")+
+  theme_minimal(base_size=9)+theme(axis.text.y=element_text(size=7))
+```
+
+Counties significantly different from the national average.
+
+```{r results-table}
+sig<-rr%>%filter(Con!="No significant difference")%>%
+  select(County,mb0,lb0,ub0,ph,pl,RR,Ev,Con)%>%
+  mutate(across(where(is.numeric),round,3))
+kable(sig,row.names=FALSE,col.names=c("County","Mean b0","Lower 95%","Upper 95%",
+                      "P(higher)","P(lower)","RR","Evidence","Conclusion"),
+      caption="Counties significantly different from the national average.")
+```
+
+## Spatial Map of Risk
+
+```{r fig-spatial-map}
+ie <- ne_states(country = "Ireland", returnclass = "sf")
+
+ie_cleaned <- ie %>%
+  mutate(County = case_when(
+    name %in% c("Dublin", "Dún Laoghaire–Rathdown", "Fingal", "South Dublin") ~ "Dublin",
+    name %in% c("North Tipperary", "South Tipperary") ~ "Tipperary",
+    name == "Laoighis" ~ "Laois",
+    TRUE ~ name
+  )) %>%
+  group_by(County) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop")
+
+rr_map <- ie_cleaned %>%
+  left_join(rr, by = "County")
+
+northern_ireland <- tryCatch({
+  ni_states <- ne_states(country = "United Kingdom", returnclass = "sf")
+  ni_states %>%
+    filter(
+      name == "Northern Ireland" |
+        name_en == "Northern Ireland" |
+        grepl("Northern Ireland", name, ignore.case = TRUE) |
+        grepl("Northern Ireland", region, ignore.case = TRUE)
+    )
+}, error = function(e) NULL)
+
+map_plot <- ggplot() +
+  geom_sf(data = rr_map, aes(fill = RR), color = "white", linewidth = 0.25) +
+  scale_fill_viridis_c(
+    option = "viridis",
+    name = "Relative Risk (RR)",
+    na.value = "white",
+    guide = guide_colorbar(
+      title.position = "top",
+      title.hjust = 0.5,
+      barwidth = 10,
+      barheight = 0.5
+    )
+  ) +
+  coord_sf(expand = FALSE) +
+  theme_void(base_size = 10) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_blank(),
+    plot.subtitle = element_blank(),
+    plot.margin = margin(2, 2, 2, 2)
+  )
+
+if (!is.null(northern_ireland) && nrow(northern_ireland) > 0) {
+  map_plot <- map_plot +
+    geom_sf(
+      data = northern_ireland,
+      fill = "white",
+      color = "#440154",
+      linewidth = 0.6,
+      inherit.aes = FALSE
+    )
+}
+
+map_plot
+```
+
+## Road Infrastructure Validation
+
+Single carriageway proportion versus average fatality rate by county.
+
+```{r fig-road-scatter}
+rrd<-panel%>%group_by(County)%>%
+  summarise(adr=mean(rate_billion,na.rm=TRUE),.groups="drop")%>%
+  left_join(road_data,by="County")
+ggplot(rrd,aes(x=pct_single,y=adr,label=County))+
+  geom_point(aes(color=pct_motorway),size=2.5)+
+  geom_text_repel(size=2.5)+
+  geom_smooth(method="lm",se=TRUE,color="red",linewidth=0.8)+
+  scale_color_gradient(low="red",high="darkgreen",name="% Motorway")+
+  labs(x="Percentage of national roads that are single carriageway",
+       y="Average deaths per billion km")+
+  theme_minimal(base_size=10)
+```
+
+Bayesian risk (b0) versus road type and traffic volume.
+
+```{r fig-combined}
+ps2<-panel%>%group_by(County)%>%summarise(ak=mean(VM,na.rm=TRUE),.groups="drop")
+fs<-rr%>%left_join(road_data%>%select(County,pct_single,pct_dual),by="County")%>%
+  left_join(ps2,by="County")
+ggplot(fs,aes(x=mb0,y=reorder(County,mb0),color=pct_single))+
+  geom_errorbarh(aes(xmin=lb0,xmax=ub0),height=0.3,alpha=0.5)+
+  geom_point(aes(size=ak),alpha=0.8)+
+  geom_vline(xintercept=0,linetype="dashed",color="gray50")+
+  scale_color_gradient(low="darkgreen",high="red",name="% Single\nCarriageway")+
+  scale_size_continuous(name="Avg billion km\ntravelled",labels=scales::comma)+
+  labs(x="Posterior mean b0 with 95% CrI",y="County")+
+  theme_minimal(base_size=9)+theme(axis.text.y=element_text(size=7))
+```
+
+# Model Selection Using DIC
+
+Comparing five nested models by removing county-level random effects one at a time.
+
+```{r dic-run}
+jd<-list(X=X,VM=VM_vec,Year_c=Year_c,covid=covid,county=county,nObs=nObs,N=N)
+rdic<-function(ms,nm){
+  m<-jags.model(textConnection(ms),data=jd,n.chains=4,n.adapt=1000,quiet=TRUE)
+  update(m,5000,progress.bar="none")
+  d<-dic.samples(m,n.iter=10000,type="pD",progress.bar="none")
+  list(name=nm,DIC=sum(d$deviance)+sum(d$penalty),
+       pD=sum(d$penalty),Deviance=sum(d$deviance))
+}
+r1<-rdic("model{for(i in 1:nObs){X[i]~dpois(mu[i])
+  log(mu[i])<-log(VM[i])+(beta0+b0[county[i]])+
+  (beta1+b1[county[i]])*Year_c[i]+(beta2+b2[county[i]])*covid[i]}
+  for(c in 1:N){b0[c]~dnorm(0,tau0);b1[c]~dnorm(0,tau1);b2[c]~dnorm(0,tau2)}
+  beta0~dnorm(1.200,9.905);beta1~dnorm(-0.002,84.665);beta2~dnorm(0.053,1.989)
+  tau0~dgamma(.001,.001);tau1~dgamma(.001,.001);tau2~dgamma(.001,.001)
+  sd0<-1/sqrt(tau0);sd1<-1/sqrt(tau1);sd2<-1/sqrt(tau2)}",
+  "M1: Full (b0+b1+b2)")
+r2<-rdic("model{for(i in 1:nObs){X[i]~dpois(mu[i])
+  log(mu[i])<-log(VM[i])+(beta0+b0[county[i]])+
+  (beta1+b1[county[i]])*Year_c[i]+beta2*covid[i]}
+  for(c in 1:N){b0[c]~dnorm(0,tau0);b1[c]~dnorm(0,tau1)}
+  beta0~dnorm(1.200,9.905);beta1~dnorm(-0.002,84.665);beta2~dnorm(0.053,1.989)
+  tau0~dgamma(.001,.001);tau1~dgamma(.001,.001)
+  sd0<-1/sqrt(tau0);sd1<-1/sqrt(tau1)}",
+  "M2: No county COVID (b0+b1)")
+r3<-rdic("model{for(i in 1:nObs){X[i]~dpois(mu[i])
+  log(mu[i])<-log(VM[i])+(beta0+b0[county[i]])+
+  beta1*Year_c[i]+beta2*covid[i]}
+  for(c in 1:N){b0[c]~dnorm(0,tau0)}
+  beta0~dnorm(1.200,9.905);beta1~dnorm(-0.002,84.665);beta2~dnorm(0.053,1.989)
+  tau0~dgamma(.001,.001);sd0<-1/sqrt(tau0)}",
+  "M3: No county trend (b0) BEST")
+r4<-rdic("model{for(i in 1:nObs){X[i]~dpois(mu[i])
+  log(mu[i])<-log(VM[i])+beta0+beta1*Year_c[i]+beta2*covid[i]}
+  beta0~dnorm(1.200,9.905);beta1~dnorm(-0.002,84.665);beta2~dnorm(0.053,1.989)}",
+  "M4: No county effects NULL")
+r5<-rdic("model{for(i in 1:nObs){X[i]~dpois(mu[i])
+  log(mu[i])<-log(VM[i])+(beta0+b0[county[i]])+
+  (beta1+b1[county[i]])*Year_c[i]}
+  for(c in 1:N){b0[c]~dnorm(0,tau0);b1[c]~dnorm(0,tau1)}
+  beta0~dnorm(1.200,9.905);beta1~dnorm(-0.002,84.665)
+  tau0~dgamma(.001,.001);tau1~dgamma(.001,.001)
+  sd0<-1/sqrt(tau0);sd1<-1/sqrt(tau1)}",
+  "M5: No COVID at all")
+dt<-bind_rows(lapply(list(r1,r2,r3,r4,r5),as.data.frame))%>%
+  mutate(across(where(is.numeric),round,2),
+         Delta_DIC=round(DIC-min(DIC),2),
+         Verdict=case_when(Delta_DIC==0~"BEST MODEL",Delta_DIC<2~"Equivalent",
+           Delta_DIC<10~"Some evidence against",TRUE~"REJECTED"))%>%
+  arrange(DIC)
+```
+
+```{r dic-table}
+kable(dt%>%select(name,DIC,pD,Deviance,Delta_DIC,Verdict),
+      col.names=c("Model","DIC","pD","Deviance","Delta DIC","Verdict"),
+      caption="DIC model comparison. Lower DIC = better model.")
+```
+
+# Appendix
+
+TII National Road Lengths 2015.
+
+```{r road-table}
+kable(road_data%>%
+        select(County,motorway_km,dual_km,single_km,total_km,pct_motorway,pct_single)%>%
+        mutate(across(where(is.numeric),round,1)),
+      col.names=c("County","Motorway km","Dual km","Single km",
+                  "Total km","% Motorway","% Single"),
+      caption="Appendix D: TII National Road Lengths 2015.")
+```

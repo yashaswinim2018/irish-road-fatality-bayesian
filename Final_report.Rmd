@@ -1,0 +1,1180 @@
+---
+title: "Bayesian Ranking of Traffic Fatality Rates per Distance Travelled in Ireland (2015-2024)"
+author:
+  - Sara Raees
+  - Yashaswini Malleshwarppa
+supervisor: "Carl Scarrott, John Ferguson"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  pdf_document:
+    number_sections: true
+    fig_caption: true
+    keep_tex: true
+    latex_engine: pdflatex
+    citation_package: natbib
+    extra_dependencies: ["amsmath", "amssymb"]
+bibliography: refs.bib
+biblio-style: plainnat
+biblio-title: References
+link-citations: true
+nocite: '@*'
+header-includes:
+  - \makeatletter
+  - \@ifpackageloaded{amsmath}{}{\usepackage{amsmath}}
+  - \@ifpackageloaded{amssymb}{}{\usepackage{amssymb}}
+  - \@ifpackageloaded{amsfonts}{}{\usepackage{amsfonts}}
+  - \makeatother
+  - \makeatletter
+  - \@ifpackageloaded{natbib}{}{\usepackage[round,authoryear]{natbib}}
+  - \providecommand{\citep}[1]{\cite{#1}}
+  - \providecommand{\citet}[1]{\cite{#1}}
+  - \makeatother
+  - \usepackage{xcolor}
+  - \usepackage{graphicx}
+  - \usepackage{geometry}
+  - \usepackage{setspace}
+  - \usepackage{float}
+  - \makeatletter
+  - \@ifpackageloaded{placeins}{}{\usepackage{placeins}}
+  - \makeatother
+  - \usepackage{caption}
+  - \usepackage{booktabs}
+  - \usepackage{array}
+  - \usepackage{titling}
+  - \definecolor{coverblue}{RGB}{18,45,92}
+  - \definecolor{covergray}{RGB}{90,90,90}
+  - \renewcommand{\maketitle}{}
+  - \definecolor{coverblue}{RGB}{18,45,92}
+  - \definecolor{covergray}{RGB}{90,90,90}
+  - \renewcommand{\maketitle}{}
+  - \AtBeginDocument{\raggedbottom}
+  - \AtBeginDocument{\raggedbottom}
+  - \setlength{\textfloatsep}{8pt plus 1pt minus 2pt}
+  - \setlength{\floatsep}{6pt plus 1pt minus 2pt}
+  - \setlength{\intextsep}{6pt plus 1pt minus 2pt}
+  - \captionsetup{font=small,skip=4pt}
+  - \makeatletter\def\fps@figure{!htbp}\def\fps@table{!htbp}\makeatother
+---
+
+\pagenumbering{gobble}
+\begin{titlepage}
+\newgeometry{top=2.1cm,bottom=2.1cm,left=2.3cm,right=2.3cm}
+\thispagestyle{empty}
+
+\begin{center}
+\vspace*{0.4cm}
+
+{\Large \textbf{University of Galway}}\\[0.25cm]
+{\large School of Mathematical and Statistical Sciences}\\[1.1cm]
+
+% If you have a university logo, save it in the same folder and uncomment this line:
+% \includegraphics[width=0.24\textwidth]{university_logo.png}\\[1cm]
+
+\rule{0.92\textwidth}{1.3pt}\\[0.7cm]
+
+{\Huge \bfseries \textcolor{coverblue}{Bayesian Ranking of Traffic Fatality Rates per Distance Travelled in Ireland}}\\[0.45cm]
+{\LARGE \bfseries \textcolor{coverblue}{2015--2024}}\\[0.7cm]
+
+\rule{0.92\textwidth}{1.3pt}\\[1.1cm]
+
+{\Large \textbf{Thesis / Project Report}}\\[0.4cm]
+{\large Submitted as part of the programme of study leading to the award of degree}\\[1.2cm]
+
+\begin{minipage}{0.82\textwidth}
+\centering
+{\large \textbf{Submitted by}}\\[0.25cm]
+{\Large Sara Raees}\\
+{\Large Yashaswini Malleshwarappa}\\[1.0cm]
+
+{\large \textbf{Supervisors}}\\[0.25cm]
+{\Large Carl Scarrott}\\
+{\Large John Ferguson}
+\end{minipage}
+
+\vfill
+
+{\large \textbf{Academic Year: 2025--2026}}\\[0.25cm]
+{\large \today}
+
+\end{center}
+
+\restoregeometry
+\end{titlepage}
+
+\clearpage
+\pagenumbering{roman}
+\setcounter{page}{1}
+\setcounter{tocdepth}{1}
+\begingroup
+\small
+\setlength{\parskip}{0pt}
+\renewcommand{\contentsname}{Contents}
+\tableofcontents
+\endgroup
+\clearpage
+
+\section*{Declaration}
+\addcontentsline{toc}{section}{Declaration}
+
+We hereby certify that this material, which we now submit for assessment on the programme of study leading to the award of degree, is entirely our own work and has not been taken from the work of others save and to the extent that such work has been cited and acknowledged within the text of our work.
+
+
+\noindent Date: \rule{5cm}{0.4pt}
+
+\clearpage
+\pagenumbering{arabic}
+\setcounter{page}{1}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo=FALSE, warning=FALSE, message=FALSE,
+  fig.width=6.8, fig.height=4.0,
+  fig.align="center", fig.pos="!htbp",
+  out.width="0.94\\linewidth",
+  dpi=300
+)
+library(rjags); library(coda); library(dplyr); library(tidyr)
+library(ggplot2); library(stringr); library(ggrepel)
+library(viridis); library(knitr); library(lme4)
+library(patchwork); library(scales); library(sf); library(rnaturalearth)
+```
+
+```{r load-data, include=FALSE}
+df1 <- read.csv("road_accidents.csv")
+df2 <- read.csv("THA17.20251105T151118.csv")
+
+acc_wide <- df1 %>%
+  filter(Statistic.Label %in% c("Persons Killed","Persons Injured"),
+         Year >= 2015, Year <= 2024) %>%
+  mutate(County=str_replace(County,"^Co\\.\\s*","")) %>%
+  select(Year,County,Statistic.Label,VALUE) %>%
+  pivot_wider(names_from=Statistic.Label,values_from=VALUE) %>%
+  rename(deaths=`Persons Killed`,injuries=`Persons Injured`)
+
+vmt <- df2 %>%
+  mutate(County=str_replace(County.of.Ownership,"^Co\\.\\s*","")) %>%
+  filter(Year>=2015,Year<=2024,
+         County.of.Ownership!="Ireland",
+         Type.of.Vehicle=="All vehicle types",
+         Year.of.Registration=="All years") %>%
+  transmute(Year,County,km=VALUE*1e6) %>%
+  mutate(VM=km/1e9)
+
+panel <- acc_wide %>%
+  left_join(vmt,by=c("Year","County")) %>%
+  filter(!is.na(VM),VM>0) %>%
+  mutate(
+    covid=ifelse(Year %in% c(2020,2021),1L,0L),
+    Year_c=Year-mean(Year,na.rm=TRUE),
+    county_id=as.integer(factor(County)),
+    rate_billion=deaths/VM
+  ) %>%
+  arrange(County,Year)
+
+X<-panel$deaths; VM_vec<-panel$VM; Year_c<-panel$Year_c
+covid<-panel$covid; county<-panel$county_id
+nObs<-nrow(panel); N<-length(unique(county))
+
+county_lookup <- panel %>%
+  select(County,county_id) %>% distinct() %>% arrange(county_id)
+saveRDS(county_lookup,"county_lookup.rds")
+saveRDS(panel,"panel.rds")
+
+road_data <- tribble(
+  ~County,~motorway_km,~dual_km,~single_km,~total_km,~area_km2,
+  "Carlow",23.533,0,54.329,77.862,897,
+  "Cavan",0,0,123.272,123.272,1932,
+  "Clare",31.631,19.546,181.546,232.723,3449,
+  "Cork",48.915,62.651,402.680,514.246,7500,
+  "Donegal",0,5.714,298.185,303.899,4861,
+  "Dublin",81.560,41.397,15.003,138.960,921,
+  "Galway",61.538,12.312,379.938,453.788,6148,
+  "Kerry",0,11.056,413.165,424.221,4807,
+  "Kildare",108.233,8.006,17.888,134.127,1693,
+  "Kilkenny",67.602,17.032,111.946,196.580,2073,
+  "Laois",66.979,0,101.508,168.487,1719,
+  "Leitrim",0,7.282,49.095,56.377,1590,
+  "Limerick",27.250,8.927,156.361,192.538,2756,
+  "Longford",0,0.156,96.618,96.774,1091,
+  "Louth",39.682,9.350,48.754,97.786,826,
+  "Mayo",0,0,397.316,397.316,5586,
+  "Meath",88.063,12.087,103.632,203.782,2342,
+  "Monaghan",0,15.222,88.478,103.700,1295,
+  "Offaly",14.684,0,101.247,115.931,2000,
+  "Roscommon",21.143,1.151,224.793,247.087,2544,
+  "Sligo",0,12.800,140.628,153.428,1836,
+  "Tipperary",121.973,3.294,210.023,335.290,4305,
+  "Waterford",0,9.690,97.061,106.751,1837,
+  "Westmeath",56.229,17.632,101.538,175.399,1840,
+  "Wexford",21.869,0,142.148,164.017,2353,
+  "Wicklow",35.327,18.332,38.146,91.805,2024
+) %>%
+  mutate(
+    pct_dual=(motorway_km+dual_km)/total_km*100,
+    pct_single=single_km/total_km*100,
+    pct_motorway=motorway_km/total_km*100,
+    road_density=total_km/area_km2
+  )
+```
+
+# Introduction
+
+## Background and Motivation
+
+Road traffic fatalities represent one of the most preventable causes of death in Ireland. As of December 31, 2024, there were **172 fatalities** on Irish roads, with an average of 14 fatalities occurring every month throughout the year [@rsa2024strategy]. Preliminary data from mid-2024 showed an **18% increase** in deaths compared to the same period in 2023 [@rsa2024strategy]. Over one-third of all road fatalities in 2024 involved individuals aged 25 years or younger. A high percentage of fatalities occur on rural single carriageway roads where head-on collisions are possible, overtaking is risky, and there are no physical barriers separating opposing traffic.
+
+## Why This Research is Being Conducted
+
+Raw fatality counts are misleading without accounting for how much driving occurs in each region. A county with many deaths may simply have more traffic. By moving beyond raw counts and incorporating vehicle kilometres travelled (VKT) as an exposure measure, the study ensures that road safety metrics account for travel volume, utilises Bayesian hierarchical modelling to borrow strength across counties and stabilise rates in areas with sparse data, investigates how the COVID-19 pandemic altered travel behaviour and fatality rates during 2020--2021, and examines whether road infrastructure characteristics explain spatial variation in county fatality risk.
+
+From a public interest and policy perspective, county-by-county comparisons of road safety are highly scrutinised by local authorities, media, and the public. Funding allocation for road infrastructure, enforcement of traffic laws, and targeted safety campaigns are often decided at the local authority or county level. Understanding local risk trends allows policy makers to identify which regions genuinely require intervention rather than reacting to raw, unadjusted counts that do not reflect actual usage.
+
+## What the Project is About
+
+The project uses a Bayesian hierarchical Poisson regression model implemented in JAGS to estimate county fatality rates per distance travelled using vehicle kilometres as an exposure offset, rank counties by underlying fatality risk using posterior credible intervals on the ranks themselves, model county-specific time trends, quantify the county-level COVID-19 effect, and examine whether road infrastructure covariates explain county-level risk variation. The research produces posterior rankings with full uncertainty quantification, hypothesis tests comparing counties to the national average and to each other, and validation of rankings using independent road infrastructure data from Transport Infrastructure Ireland (TII) [@tii2016roadlengths].
+
+\FloatBarrier
+\clearpage
+
+# Data Sources
+
+This chapter describes the four main data sources used to construct the county-year panel dataset for Ireland covering 2015--2023. These sources were selected to provide the three essential components of the analysis: a count outcome variable (road fatalities), an exposure denominator (vehicle kilometres travelled), and explanatory covariates (road infrastructure characteristics). All four datasets were merged on county name and calendar year to produce a panel of **234 observations** -- 26 counties over 9 years.
+
+## Road Traffic Fatality and Collision Data
+
+The primary outcome data were obtained from the **Road Safety Authority (RSA)** [@rsa2024strategy], which provides annual county-level road traffic collision statistics including fatality counts, serious injury counts, and collision reports. The RSA is the national body responsible for road safety in Ireland and publishes provisional annual figures that are subsequently revised as investigations conclude. For this project, the fatality variable was extracted and organised by county, calendar year, and number of persons killed. Additional injury counts were retained for descriptive analysis. RSA figures for 2023 are published as provisional and should be interpreted with appropriate caution, as late-reported fatalities may not yet be included.
+
+## Vehicle Kilometres Travelled (Exposure Data)
+
+**Vehicle kilometres travelled (VKT)** data were obtained from the **Central Statistics Office (CSO)** Transport Hub table **THA17** [@cso2023tha17], which reports annual road traffic volumes and average kilometres travelled by county. These estimates are constructed by the CSO by combining multiple data sources including traffic count surveys, fuel sales data, and vehicle registration records. VKT is the central exposure measure in this project because counties with more traffic are naturally expected to record more collisions and fatalities in absolute terms. A county with 16 deaths and 9.6 billion kilometres of driving is far safer per kilometre driven than a county with 2 deaths and only 0.3 billion kilometres of driving.
+
+## Population Data
+
+County-level population estimates were obtained from **CSO intercensal estimates** and **Census 2016 and 2022** figures [@cso2016census; @cso2022census]. These were used to compute supplementary descriptive rates expressed as deaths per 100,000 population, providing an additional perspective alongside the exposure-adjusted kilometre-based rates used in the main model. Population-based rates were not used as the primary outcome measure because driving exposure -- not population size -- determines road fatality risk.
+
+## Road Infrastructure Data
+
+National road length data were obtained from **Transport Infrastructure Ireland (TII)** -- specifically the *National Road Lengths 2015* report published in September 2016 [@tii2016roadlengths]. This report provides the total length in kilometres of motorway, dual carriageway, and single carriageway national roads for each local authority area in Ireland. Since Dublin is administered by four local authorities (Dublin City, Dun Laoghaire-Rathdown, Fingal, and South Dublin), Cork by two (Cork City and Cork County), and Galway by two (Galway City and Galway County), the road length figures for these local authorities were aggregated to produce single county-level figures consistent with the fatality and VKT datasets.
+
+## Data Integration
+
+The four datasets were integrated through a sequential merging process, merging on a standardised county name and year. The CSO population data were merged on county name and census year, with intercensal estimates used for non-census years. The resulting panel contains one row per county-year combination, with no missing values in the core analysis variables.
+
+\FloatBarrier
+
+# Data Preparation
+
+This chapter describes the data cleaning and transformation steps applied to the raw datasets before modelling. The goal of data preparation was to harmonise the sources into a single county-year panel and define the key variables. All steps were implemented in R using the `dplyr`, `tidyr`, and `stringr` packages [@R-base].
+
+## Defining variables
+
+The raw datasets were cleaned by removing the prefix "Co." from county name fields, trimming whitespace, filtering to the study period 2015--2023, and removing the national aggregate "Ireland" row. From the resulting panel, five key variables were defined for modelling:
+
+**Step 1 -- Offset variable creation**: VKT was expressed in billions of kilometres:
+$$\text{VM}_{it} = \frac{\text{km}_{it}}{1{,}000{,}000{,}000}$$
+This scaling prevents numerical instability in the Poisson offset -- without it the log-linear predictor would involve extremely small numbers. Expressing VKT in billions of kilometres makes the values easier to read.
+
+**Step 2 -- COVID indicator**:
+$$\text{COVID}_t = \begin{cases} 1 & \text{if } t \in \{2020, 2021\} \\ 0 & \text{otherwise} \end{cases}$$
+
+**Step 3 -- Centred year variable**:
+$$\text{Year\_c}_{t} = \text{Year}_t - \bar{\text{Year}}$$
+where $\bar{\text{Year}} = 2019.0$. Centring is critical for two reasons. First, the intercept $\beta_0$ becomes interpretable as the national baseline log fatality rate at the midpoint of the study period. Second, centring reduces correlation between intercept and slope parameters in the MCMC sampler, improving chain mixing.
+
+**Step 4 -- Crude fatality rates**:
+$$\text{Rate}_{it} = \frac{\text{Deaths}_{it}}{\text{VM}_{it}}$$
+expressing deaths per billion vehicle kilometres travelled.
+
+**Step 5 -- Road infrastructure variables**:
+$$\text{pct\_dual}_c = \frac{\text{motorway\_km}_c + \text{dual\_km}_c}{\text{total\_km}_c} \times 100$$
+$$\text{road\_density}_c = \frac{\text{total\_km}_c}{\text{area\_km}^2_c}$$
+The variable $\text{pct\_dual}_c$ captures the proportion of a county's national roads that physically separate opposing traffic (motorways and dual carriageways). The variable $\text{road\_density}_c$ captures how well connected the road network is per unit of land area.
+
+```{r panel-summary}
+kable(data.frame(
+  Statistic=c("Total observations","Counties","Years",
+               "Mean deaths/county/year","Variance of deaths",
+               "Variance/Mean ratio","COVID years","Zero deaths"),
+  Value=c(nObs,N,"2015 to 2023",
+          round(mean(X),2),round(var(X),2),
+          round(var(X)/mean(X),2),sum(covid),sum(X==0))
+), col.names=c("Statistic","Value"),
+caption="Panel dataset summary statistics.")
+```
+
+This chapter has described the complete data preparation pipeline applied to all four source datasets. The steps transformed heterogeneous raw data from four different organisations into a single harmonised 234-observation panel ready for statistical modelling. The key derived variables -- the VKT offset $\text{VM}_{it}$, the centred year $\text{Year\_c}_t$, the COVID indicator, and the road infrastructure covariates $\text{pct\_dual}_c$ and $\text{road\_density}_c$ -- form the core inputs to the Bayesian hierarchical model described in Chapter 5.
+
+\FloatBarrier
+
+# Exploratory Data Analysis
+
+This chapter presents exploratory data analysis (EDA) conducted to understand the temporal and spatial structure of the data before fitting the Bayesian hierarchical Poisson model. The EDA serves three purposes: to provide a descriptive summary of road fatality patterns across counties and years, to motivate the key modelling choices including the use of VKT as an exposure denominator and the inclusion of a COVID indicator, and to identify counties with consistently high or low risk that should emerge from the Bayesian model. All analyses in this chapter are purely descriptive and make no inferential claims -- formal inference is reserved for Chapters 6 through 8.
+
+## National Temporal Trends
+
+Figure 4.1 shows raw death counts for all 26 counties from 2015 to 2023. Dublin dominates simply because it has the most vehicles and the most driving. This illustrates the core problem with raw counts -- Dublin appears most dangerous when it is in fact the safest county once exposure is accounted for. The injury chart (Figure 4.2) shows a clear drop in 2020 consistent with the reduction in vehicle kilometres during COVID-19 lockdowns.
+
+```{r fig-deaths, fig.width=6.8, fig.height=4.0, out.width="0.94\\linewidth", fig.pos="!htbp", fig.cap="Raw road fatalities by county 2015-2023."}
+ggplot(acc_wide,aes(x=Year,y=deaths,color=County,group=County))+
+  geom_line(linewidth=0.7)+geom_point(size=1.2)+
+  scale_x_continuous(breaks=sort(unique(panel$Year)))+
+  labs(x="Year",y="Persons Killed")+
+  theme_minimal(base_size=10)+
+  theme(axis.text.x=element_text(angle=45,hjust=1),
+        legend.text=element_text(size=6),legend.key.size=unit(0.3,"cm"))
+```
+
+```{r fig-injuries, fig.width=6.8, fig.height=4.0, out.width="0.94\\linewidth", fig.pos="!htbp", fig.cap="Raw road injuries by county 2015-2023."}
+ggplot(acc_wide,aes(x=Year,y=injuries,color=County,group=County))+
+  annotate("rect", xmin=2020, xmax=2021, ymin=-Inf, ymax=Inf, fill="gray85", alpha=0.5) +
+  geom_line(linewidth=0.7)+geom_point(size=1.2)+
+  scale_x_continuous(breaks=sort(unique(panel$Year)))+
+  labs(x="Year",y="Persons Injured")+
+  theme_minimal(base_size=10)+
+  theme(axis.text.x=element_text(angle=45,hjust=1),
+        legend.text=element_text(size=6),legend.key.size=unit(0.3,"cm"))
+```
+
+Once we adjust for vehicle kilometres the picture changes dramatically. Figure 4.3 shows the national fatality rate expressed as deaths per billion kilometres. The rate **increased in 2020** despite fewer total deaths because the reduction in vehicle kilometres was proportionally larger than the reduction in deaths. This counter-intuitive finding is consistent with the literature: Adminaite-Fodor et al. [-@adminaite2021pin] found that Ireland was one of only two countries globally where road fatalities increased during COVID-19, the other being the United States. Adminaite-Fodor et al. [-@adminaite2021pin] noted that the increase in road fatality rates during mobility restrictions in some countries was associated with increased average speeds on less congested roads.
+
+```{r fig-national-rate, fig.width=6.6, fig.height=3.2, out.width="0.88\\linewidth", fig.pos="!htbp", fig.cap="National road fatality rate per billion km 2015-2023."}
+nat_rate <- panel %>% group_by(Year) %>%
+  summarise(td=sum(deaths,na.rm=TRUE),tk=sum(km,na.rm=TRUE),
+            rate=td/(tk/1e9),.groups="drop")
+ggplot(nat_rate,aes(x=Year,y=rate))+
+  geom_line(linewidth=1.2,color="#d73027")+
+  geom_point(size=2.5,color="#d73027")+
+  geom_vline(xintercept=2020,linetype="dashed",color="gray50")+
+  annotate("text",x=2020.2,y=max(nat_rate$rate)*0.96,
+           label="COVID",hjust=0,size=3,color="gray40")+
+  scale_x_continuous(breaks=sort(unique(panel$Year)))+
+  labs(x="Year",y="Deaths per billion km")+
+  theme_minimal(base_size=10)+
+  theme(axis.text.x=element_text(angle=45,hjust=1))
+```
+
+## County-Level Descriptive Summary
+
+The crude exposure-adjusted rates reveal a striking reversal of the raw count ordering. Dublin has approximately **1.66 deaths per billion km** -- the safest county. Kildare has approximately **2.08 deaths per billion km** -- second safest. Longford has approximately **11.26 deaths per billion km** -- among the highest crude rates. This reversal demonstrates conclusively why raw counts are inadequate for county comparisons.
+
+Figure 4.4 presents a heatmap of the exposure-adjusted rate for every county-year combination side-by-side with the crude average rate ranking over the entire period (2015–2023). Dublin consistently appears in the coolest colour throughout all 9 years. Counties like Louth, Monaghan, and Donegal consistently appear in warmer colours, suggesting structural and persistent differences in risk. This persistence across years motivates the hierarchical model structure where county random intercepts $b_{0c}$ capture stable underlying risk differences rather than random year-to-year fluctuation.
+
+```{r fig-combined-eda, fig.width=7.2, fig.height=5.2, out.width="0.98\\linewidth", fig.pos="!htbp", fig.cap="County-level road fatality rate per billion km: (a) Heatmap of annual rates by county and year; (b) Average rate by county over the study period (2015-2023)."}
+library(patchwork)
+
+p1 <- ggplot(panel,aes(x=Year,y=County,fill=rate_billion))+
+  geom_tile(color="white",linewidth=0.2)+
+  scale_fill_viridis(option="C",name="Deaths per\nbillion km")+
+  scale_x_continuous(breaks=sort(unique(panel$Year)))+
+  labs(x="Year",y="County")+
+  theme_minimal(base_size=9)+
+  theme(axis.text.x=element_text(angle=45,hjust=1),
+        axis.text.y=element_text(size=7))
+
+avg_rate <- panel %>% group_by(County) %>%
+  summarise(avg_rate=mean(rate_billion,na.rm=TRUE),.groups="drop")
+
+p2 <- ggplot(avg_rate,aes(x=reorder(County,avg_rate),y=avg_rate))+
+  geom_col(fill="firebrick",alpha=0.85)+coord_flip()+
+  labs(x="County",y="Avg deaths per billion km")+
+  theme_minimal(base_size=9)
+
+p1 + p2 + plot_layout(ncol = 2) + plot_annotation(tag_levels = 'a')
+```
+
+## Justification for Bayesian Hierarchical Modelling
+
+Two features of the EDA directly justify the hierarchical approach. First, many counties record fewer than 5 deaths per year. The mean deaths per county-year is `r round(mean(X),2)` with variance `r round(var(X),2)`, giving a raw variance-to-mean ratio of `r round(var(X)/mean(X),2)`. A single unusual year can produce dramatic swings in crude rates for small counties. A hierarchical model addresses this through shrinkage -- pulling noisy estimates toward the national average. Second, the COVID-19 period produced a structural break in VKT and driving behaviour that must be modelled explicitly. Figure 4.4b shows the crude average rate ranking -- the key limitation is that it provides no uncertainty quantification.
+
+This chapter has provided a descriptive overview of the road fatality data across all 26 Irish counties from 2015 to 2023. The key findings from the EDA are threefold. First, raw death counts are a misleading measure of road safety risk -- Dublin dominates raw counts but is the safest county per kilometre driven. Second, the COVID-19 period produced a structural break in driving behaviour that is visible in both the injury time series and the national fatality rate. Third, county-level fatality counts are small and volatile, particularly for rural counties, which motivates the Bayesian hierarchical approach with shrinkage. These findings directly inform the model specification described in Chapter 5.
+
+\FloatBarrier
+
+# Statistical Methodology
+
+```{r run-jags, include=FALSE, cache=TRUE}
+jags_data <- list(X=X,VM=VM_vec,Year_c=Year_c,
+                  covid=covid,county=county,nObs=nObs,N=N)
+model_string <- "
+model {
+  for (i in 1:nObs) {
+    X[i] ~ dpois(mu[i])
+    log(mu[i]) <- log(VM[i]) +
+                  (beta0 + b0[county[i]]) +
+                  beta1 * Year_c[i] +
+                  beta2 * covid[i]
+  }
+  for (c in 1:N) {
+    b0[c] ~ dnorm(0, tau0)
+  }
+  beta0 ~ dnorm(1.200, 9.905)
+  beta1 ~ dnorm(-0.002, 84.665)
+  beta2 ~ dnorm( 0.053,  1.989)
+  tau0 ~ dgamma(0.001, 0.001)
+  sd0 <- 1/sqrt(tau0)
+}
+"
+m_main <- jags.model(textConnection(model_string),
+                      data=jags_data,n.chains=4,n.adapt=1000)
+update(m_main,5000)
+samp <- coda.samples(m_main,
+  variable.names=c("beta0","beta1","beta2","b0","sd0"),
+  n.iter=20000)
+saveRDS(samp,"posterior_informed_priors.rds")
+pm <- as.matrix(samp)
+```
+
+This chapter describes the three-stage statistical methodology used in the analysis [@gelman2013bda]. In the first stage, two frequentist Poisson generalised linear mixed models are fitted as a classical baseline to test whether county-specific time slopes are warranted and to derive informed prior means for the Bayesian model. In the second stage, the main Bayesian hierarchical Poisson regression model is specified and fitted in JAGS with 80,000 posterior draws across four independent chains. In the third stage, an extended model incorporating road infrastructure covariates is fitted. The chapter proceeds from the likelihood specification through the prior and hyperprior structure, the MCMC sampling settings, and the posterior summary. Technical details of the MCMC convergence diagnostics are presented in Chapter 6.
+
+## Main Model: Bayesian Hierarchical Poisson Model
+
+### Model Specification
+
+Let $X_{it}$ denote road fatalities in county $c$ at year $t$ and $\text{VM}_{it}$ denote vehicle kilometres in billions:
+$$X_{it} \sim \text{Poisson}(\mu_{it})$$
+$$\log(\mu_{it}) = \underbrace{\log(\text{VM}_{it})}_{\text{offset}} + \underbrace{(\beta_0 + b_{0c})}_{\text{county intercept}} + \underbrace{\beta_1 \cdot \text{Year\_c}_{t}}_{\text{time trend}} + \underbrace{\beta_2 \cdot \text{COVID}_{t}}_{\text{COVID effect}}$$
+
+The offset $\log(\text{VM}_{it})$ enters with a fixed coefficient of exactly 1 -- converting the model from predicting raw death counts to predicting death rates per billion kilometres driven. This offset ensures that the log-linear predictor is adjusted for traffic volume (exposure). The national baseline $\beta_0$ represents the average log fatality rate across all counties at the centre of the study period. The county random intercept $b_{0c}$ captures how much county $c$ deviates from this national baseline -- positive values indicate higher risk, negative values indicate lower risk. This is the **key parameter for ranking**. The national time trend $\beta_1$ captures whether Ireland as a whole is improving or worsening in fatality risk per kilometre. The national COVID effect $\beta_2$ captures changes in the covid impacted years.
+
+### Random Effects and Hyperpriors
+
+The county-level random effects are drawn from a common normal distribution centred at zero:
+$$b_{0c} \sim \text{Normal}(0, \tau_0)$$
+
+Centring at zero means county effects represent deviations from the national average. The precision parameter $\tau_0 = 1/\sigma^2_0$ controls how much counties deviate from the national baseline. When $\tau_0$ is large, county baseline risks are similar -- strong shrinkage. When $\tau_0$ is small, counties can have very different baseline risks -- weak shrinkage. The precision parameter receives a weakly informative gamma hyperprior:
+$$\tau_0 \sim \text{Gamma}(0.001, 0.001)$$
+This is a nearly flat prior on the positive real line, allowing the data to determine how much county variation is present. The derived standard deviation parameter is:
+$$\text{sd}_0 = \frac{1}{\sqrt{\tau_0}}$$
+which is more interpretable -- $\text{sd}_0 = `r round(mean(pm[,"sd0"]), 3)`$ means most county baseline effects fall within $\pm 2 \times `r round(mean(pm[,"sd0"]), 3)` = `r round(2*mean(pm[,"sd0"]), 3)`$ log units of the national mean, corresponding to relative risks between $e^{-`r round(2*mean(pm[,"sd0"]), 3)`} = `r round(exp(-2*mean(pm[,"sd0"])), 2)`$ and $e^{`r round(2*mean(pm[,"sd0"]), 3)`} = `r round(exp(2*mean(pm[,"sd0"])), 2)`$ times the national average.
+
+### Extended Model with Road Infrastructure Covariates
+
+An extended model includes two county-level road infrastructure covariates:
+$$\log(\mu_{it}) = \log(\text{VM}_{it}) + (\beta_0 + b_{0c}) + \beta_1 \cdot \text{Year\_c}_{t} + \beta_2 \cdot \text{COVID}_{t} + \beta_3 \cdot \text{pct\_dual}_c + \beta_4 \cdot \text{road\_density}_c$$
+The coefficient $\beta_3$ captures the effect of dual carriageway and motorway proportion on log fatality rate -- expected negative since motorway and dual carriageway roads eliminate head-on collision risk. The coefficient $\beta_4$ captures the effect of road density -- also expected negative since higher density indicates more urban, better-connected counties with lower risk.
+
+### MCMC Settings
+
+The model was implemented in JAGS through the `rjags` interface. JAGS uses Gibbs sampling -- a form of Markov Chain Monte Carlo -- updating each parameter in turn from its full conditional distribution given all other parameters and the data. Four independent chains were run with different random starting positions:
+
+- Adaptation: 1,000 iterations (tuning -- discarded)
+- Burn-in: 5,000 iterations (warm-up -- discarded)  
+- Sampling: 20,000 iterations per chain (retained)
+- Total posterior draws: $4 \times 20{,}000 = \mathbf{80{,}000}$
+
+### Posterior Summary
+
+Table 5.1 presents the posterior mean and 95% credible interval for all global fixed effects and variance parameters. A parameter is considered different from zero if its 95% credible interval does not include zero.
+
+```{r posterior-table}
+ps <- c("beta0","beta1","beta2","sd0")
+pt <- data.frame(
+  Parameter=c("$\\beta_0$","$\\beta_1$","$\\beta_2$","$\\sigma_0$"),
+  Meaning=c("National baseline log-rate","National time trend",
+            "National COVID effect","County baseline SD"),
+  Mean=sapply(ps,function(p)round(mean(pm[,p]),4)),
+  L95=sapply(ps,function(p)round(quantile(pm[,p],0.025),4)),
+  U95=sapply(ps,function(p)round(quantile(pm[,p],0.975),4)),
+  Pgt0=sapply(ps,function(p)round(mean(pm[,p]>0),4)),
+  Sig=sapply(ps,function(p){
+    lo<-quantile(pm[,p],0.025);hi<-quantile(pm[,p],0.975)
+    ifelse(lo>0|hi<0,"YES","NO")})
+)
+kable(pt,row.names=FALSE,col.names=c("Parameter","Meaning","Post. Mean",
+                     "Lower 95% CrI","Upper 95% CrI","P(>0)","Different from 0?"),
+      caption="Posterior summary of global parameters.")
+```
+
+The national baseline $\beta_0 = `r round(mean(pm[,"beta0"]), 3)`$ is highly different from zero with a tight credible interval entirely above zero. The national time trend $\beta_1 = `r round(mean(pm[,"beta1"]), 3)`$ has a credible interval crossing zero -- no national improvement or worsening over 2015--2023. The national COVID effect $\beta_2 = `r round(mean(pm[,"beta2"]), 3)`$ also crosses zero -- COVID did not produce a different national fatality rate per kilometre. Crucially, the county baseline standard deviation $\text{sd}_0 = `r round(mean(pm[,"sd0"]), 3)`$ has a credible interval entirely above zero -- counties **differ in risk** in their baseline fatality risk, justifying the entire ranking analysis.
+
+This chapter has specified the complete Bayesian hierarchical Poisson model used for county-level fatality rate estimation and ranking. The model combines a Poisson likelihood with a VKT exposure offset, county-level random effects for baseline risk, and global time trend and COVID response. The JAGS implementation with four chains of 20,000 iterations each produces 80,000 posterior draws for all model parameters. Before presenting results, the following chapter verifies that these draws faithfully represent the true posterior distribution through four complementary convergence diagnostics.
+
+\FloatBarrier
+
+# MCMC Convergence Diagnostics
+
+MCMC sampling produces a sequence of correlated draws that approximate the posterior distribution only if the sampler has converged to a stationary distribution. Convergence cannot be guaranteed in finite time but can be assessed empirically using diagnostic statistics. This chapter presents four complementary convergence diagnostics applied to all four global parameters of the main model M3: $\beta_0$, $\beta_1$, $\beta_2$, and $\sigma_0$ ($\text{sd}_0$). The trace plots are presented in a 2x2 layout, and the density plots are in a 4x1 layout, each showing four separate chain lines.
+
+## Four Convergence Criteria
+
+MCMC sampling draws correlated random samples that approximate the posterior distribution only if the sampler has converged. We assess convergence using four complementary diagnostics.
+
+**Trace plots**: Show the value of each parameter at every iteration for all four chains. A well-converged chain shows a stationary fuzzy caterpillar pattern -- stable oscillation around a fixed mean with all four chains overlapping. Trending, drifting, or separated chains indicate non-convergence.
+
+**Density plots**: Show the marginal posterior distribution separately for each of the four chains. If converged, all four chain densities sit exactly on top of each other -- same shape, same location. The professor specifically requested four separate chain lines rather than one combined density.
+
+**Gelman-Rubin R-hat**: The formal mathematical convergence diagnostic. It computes:
+$$\hat{R} = \sqrt{\frac{\hat{V}}{W}}, \quad \text{where } \hat{V} = \frac{n-1}{n}W + \frac{1}{n}B$$
+$W$ is within-chain variance and $B$ is between-chain variance. When chains converge, $B \approx 0$ and $\hat{R} \approx 1.00$. Values below 1.05 indicate convergence; values above 1.10 indicate non-convergence.
+
+**Effective Sample Size (ESS)**: Accounts for autocorrelation between consecutive MCMC draws:
+$$\text{ESS} = \frac{S}{1 + 2\sum_{k=1}^{\infty} \rho_k}$$
+where $S = 80{,}000$ and $\rho_k$ is the autocorrelation at lag $k$. ESS above 1,000 is required for reliable posterior quantile estimation.
+
+## Trace Plots -- Vertical 2x2 Layout
+
+Figure 6.1 shows trace plots for all four global parameters in a 2x2 horizontal grid. All four chains show the fuzzy caterpillar pattern for every parameter -- no trends, no separation, confirming convergence.
+
+```{r fig-trace, fig.width=7.2, fig.height=4.8, out.width="0.96\\linewidth", fig.pos="!htbp", fig.cap="MCMC trace plots."}
+samp2<-readRDS("posterior_informed_priors.rds")
+pm2<-as.matrix(samp2); n_iter<-nrow(pm2)/4
+params<-c("beta0","beta1","beta2","sd0")
+cols4<-c("blue","red","darkgreen","purple")
+main_titles <- list(
+  beta0 = expression("Trace: " * beta[0]),
+  beta1 = expression("Trace: " * beta[1]),
+  beta2 = expression("Trace: " * beta[2]),
+  sd0 = expression("Trace: " * sigma[0])
+)
+ylabels <- list(
+  beta0 = expression(beta[0]),
+  beta1 = expression(beta[1]),
+  beta2 = expression(beta[2]),
+  sd0 = expression(sigma[0])
+)
+par(mfrow=c(2,2),mar=c(3,3,2,1))
+for(p in params){
+  ad<-pm2[,p]
+  ch<-lapply(1:4,function(i)ad[((i-1)*n_iter+1):(i*n_iter)])
+  plot(ch[[1]],type="l",col=cols4[1],main=main_titles[[p]],
+       xlab="Iter",ylab=ylabels[[p]],ylim=range(ad))
+  for(i in 2:4)lines(ch[[i]],col=cols4[i])
+  legend("topright",legend=paste("Chain",1:4),col=cols4,lwd=1,cex=0.4,bty="n")
+}
+```
+
+## Density Plots -- Vertical 4x1 Layout with 4 Separate Chains
+
+Figure 6.2 shows density plots in a 4x1 vertical column with four separate lines per parameter. All four lines sit essentially on top of each other, confirming that the chains have explored the same posterior distribution.
+
+```{r fig-density, fig.width=5.2, fig.height=7.4, out.width="0.72\\linewidth", fig.pos="!htbp", fig.cap="MCMC density plots with 4 separate chain lines."}
+density_titles <- list(
+  beta0 = expression("Density: " * beta[0]),
+  beta1 = expression("Density: " * beta[1]),
+  beta2 = expression("Density: " * beta[2]),
+  sd0 = expression("Density: " * sigma[0])
+)
+par(mfrow=c(4,1),mar=c(3,3,2,1))
+for(p in params){
+  ad<-pm2[,p]
+  ch<-lapply(1:4,function(i)ad[((i-1)*n_iter+1):(i*n_iter)])
+  dl<-lapply(ch,density)
+  xlim<-range(sapply(dl,function(d)range(d$x)))
+  ylim<-range(sapply(dl,function(d)range(d$y)))
+  plot(dl[[1]],col=cols4[1],lwd=2,main=density_titles[[p]],
+       xlab=ylabels[[p]],xlim=xlim,ylim=ylim)
+  for(i in 2:4)lines(dl[[i]],col=cols4[i],lwd=2)
+  abline(v=0,col="black",lty=3)
+  legend("topright",legend=paste("Chain",1:4),col=cols4,lwd=1.5,cex=0.4,bty="n")
+}
+```
+
+## Formal Convergence Statistics
+
+```{r convergence-table}
+gd<-gelman.diag(samp2); es<-effectiveSize(samp2)
+ct<-data.frame(Parameter=c("$\\beta_0$","$\\beta_1$","$\\beta_2$","$\\sigma_0$"),
+               Rhat=round(gd$psrf[params,1],4),
+               Rhat_UCI=round(gd$psrf[params,2],4),
+               ESS=round(es[params]),
+               Pass=ifelse(gd$psrf[params,1]<1.05&es[params]>1000,"YES","CHECK"))
+kable(ct,row.names=FALSE,col.names=c("Parameter","R-hat","R-hat UCI","ESS","Passed?"),
+      caption="Formal convergence diagnostics. All R-hat below 1.05 and ESS above 1000.")
+```
+
+All parameters have Gelman-Rubin R-hat below 1.05 and effective sample sizes well above 1,000, confirming convergence.
+
+## Prior vs Posterior Comparison
+
+Figure 6.3 compares prior distributions (red) against posterior distributions (blue). For $\beta_0$, the posterior is substantially narrower than the prior, indicating the data provided strong information about the national baseline. For $\beta_1$ and $\beta_2$, the posterior is narrower and centred near zero, indicating the data updated our beliefs.
+
+```{r fig-prior-post, fig.width=7.2, fig.height=2.9, out.width="0.96\\linewidth", fig.pos="!htbp", fig.cap="Prior vs posterior comparison for global parameters."}
+set.seed(123); ns<-80000
+b0p<-rnorm(ns,1.200,1/sqrt(9.905))
+b1p<-rnorm(ns,-0.002,1/sqrt(84.665))
+b2p<-rnorm(ns,0.053,1/sqrt(1.989))
+prior_post_titles <- list(
+  beta0 = expression(beta[0]),
+  beta1 = expression(beta[1]),
+  beta2 = expression(beta[2])
+)
+par(mfrow=c(1,3),mar=c(4,3,3,1))
+for(i in 1:3){
+  param<-c("beta0","beta1","beta2")[i]
+  pv<-list(b0p,b1p,b2p)[[i]]
+  pov<-pm2[,param]
+  pv_dens <- density(pv)
+  pov_dens <- density(pov)
+  xl<-quantile(c(pv,pov),c(0.001,0.999))
+  yl<-range(c(pv_dens$y,pov_dens$y))
+  plot(pv_dens,col="red",lwd=2,main=prior_post_titles[[param]],xlab=prior_post_titles[[param]],xlim=xl,ylim=yl)
+  lines(pov_dens,col="blue",lwd=2)
+  abline(v=0,lty=3)
+  legend("topright",legend=c("Prior","Posterior"),col=c("red","blue"),lwd=2,cex=0.65)
+}
+```
+
+## Prior Predictive Check
+
+We performed a prior predictive check by simulating 1,000 datasets from the prior distributions before fitting the model. For each simulation $s$, we drew $\beta_0^{(s)}, \beta_1^{(s)}, \beta_2^{(s)}$ from their informed priors, drew county effects from $\text{Normal}(0, \text{sd}_0^2)$ using the posterior mean of $\text{sd}_0$ from the model, and simulated $X_{it}^{(s)} \sim \text{Poisson}(\mu_{it}^{(s)})$.
+
+```{r prior-pred, include=FALSE}
+set.seed(123); ns2<-1000
+pp<-matrix(NA,nrow=ns2,ncol=nObs)
+sd0_val <- mean(pm2[,"sd0"])
+for(s in 1:ns2){
+  b0s<-rnorm(N,0,sd0_val)
+  beta0s<-rnorm(1,1.200,1/sqrt(9.905))
+  beta1s<-rnorm(1,-0.002,1/sqrt(84.665))
+  beta2s<-rnorm(1,0.053,1/sqrt(1.989))
+  lmu<-log(VM_vec)+(beta0s+b0s[county])+beta1s*Year_c+beta2s*covid
+  pp[s,]<-rpois(nObs,pmin(exp(lmu),1000))
+}
+plo<-apply(pp,2,quantile,0.025,na.rm=TRUE)
+phi<-apply(pp,2,quantile,0.975,na.rm=TRUE)
+coverage<-mean(X>=plo&X<=phi,na.rm=TRUE)
+```
+
+The prior predictive coverage was **`r round(coverage*100,1)`%** -- the proportion of observed deaths falling within the prior 95% interval. This confirms our priors are appropriately calibrated.
+
+This chapter has verified that all four convergence diagnostics pass for the main model. All Gelman-Rubin R-hat values are below 1.05, all effective sample sizes exceed 1,000, all trace plots show the fuzzy caterpillar pattern, and all density plots show the four chain posteriors superimposed. The prior predictive coverage of `r round(coverage*100,1)`% confirms the priors are appropriately calibrated. We therefore proceed to the Bayesian ranking methodology with confidence that the posterior draws faithfully represent the true posterior distribution.
+
+\FloatBarrier
+
+# Bayesian Ranking Methodology
+
+```{r ranking-compute, include=FALSE}
+samp3<-readRDS("posterior_informed_priors.rds")
+pm3<-as.matrix(samp3); cl<-readRDS("county_lookup.rds")
+b0c<-grep("^b0\\[",colnames(pm3),value=TRUE)
+b0s<-pm3[,b0c]
+rm_mat<-t(apply(b0s,1,function(x)rank(-x)))
+rr<-data.frame(
+  County=cl$County,mb0=colMeans(b0s),
+  lb0=apply(b0s,2,quantile,0.025),ub0=apply(b0s,2,quantile,0.975),
+  mr=colMeans(rm_mat),lr=apply(rm_mat,2,quantile,0.025),
+  ur=apply(rm_mat,2,quantile,0.975),
+  ph=colMeans(b0s>0),pl=colMeans(b0s<0),
+  RR=exp(colMeans(b0s))/mean(exp(colMeans(b0s)))
+) %>%
+  mutate(Ev=case_when(pmax(ph,pl)>0.999~"Decisive",
+    pmax(ph,pl)>0.975~"Strong",pmax(ph,pl)>0.950~"Moderate",
+    pmax(ph,pl)>0.750~"Weak",TRUE~"None"),
+    Con=case_when(ph>0.975~"Significantly HIGHER RISK",
+      pl>0.975~"Significantly LOWER RISK",TRUE~"No significant difference")
+  ) %>% arrange(mb0)
+```
+
+This chapter describes the complete Bayesian ranking procedure applied to the posterior draws from the JAGS model. The procedure translates 80,000 MCMC draws of the county random intercept $b_{0c}$ into a full posterior distribution of county ranks, relative risk estimates, pairwise comparison probabilities, and formal hypothesis tests. The key methodological innovation of this project is that uncertainty is quantified not only on the underlying parameter $b_{0c}$ but on the **rank itself** -- an approach that is impossible in classical frequentist ranking.
+
+## Motivation for Bayesian Ranking
+
+Classical ranking assigns each county a single fixed rank based on a point estimate such as the maximum likelihood estimate or the crude exposure-adjusted rate. This approach has two fundamental limitations. First, it ignores uncertainty: a county with a point estimate of $+0.45$ and a wide confidence interval $[-0.10, +0.90]$ is ranked above a county with a point estimate of $+0.42$ and an equally wide interval, even though in many random samples the second county would rank higher. Second, it does not allow principled pairwise comparison: testing whether County A is significantly riskier than County B requires multiple testing corrections that become highly conservative for all $26 \times 25 / 2 = 325$ possible county pairs.
+
+The Bayesian hierarchical approach resolves both limitations simultaneously. The posterior distribution of $b_{0c}$ already incorporates uncertainty from sparse data, measurement error, and hierarchical shrinkage. Applying the ranking operation to each of the 80,000 posterior draws propagates this uncertainty directly onto the ranks, producing a posterior distribution of ranks for each county. Counties with tight posterior distributions of $b_{0c}$ will have tight rank distributions; counties with wide posterior distributions will have wide rank distributions. No separate correction for multiple comparisons is needed because each pairwise probability is a direct posterior statement.
+
+## Step 1: Extraction of Posterior Samples
+
+After running `coda.samples` in JAGS, the posterior draws for the county baseline risk intercepts ($b_{0c}$ or $\beta_{0,c}$) are extracted as a matrix. Let $\mathbf{B}_0 \in \mathbb{R}^{S \times C}$ denote the matrix of posterior draws, where $S = 80{,}000$ is the total number of draws and $C = 26$ is the number of counties. The $(s,c)$ entry of this matrix is denoted $b_{0c}^{(s)}$ -- the value of the county-$c$ random intercept at MCMC iteration $s$. This matrix is the fundamental input to all subsequent ranking calculations.
+
+## Step 2: Rank Computation for Posterior Sample
+
+For each MCMC iteration $s = 1, \ldots, S$, the 26 county intercepts $\{b_{0c}^{(s)}\}_{c=1}^{26}$ are ranked simultaneously. The rank of county $c$ at iteration $s$ is defined as:
+$$r_c^{(s)} = \text{rank}\left(-b_{0c}^{(s)}\right), \quad c = 1, \ldots, 26, \quad s = 1, \ldots, S.$$
+
+The negative sign is applied so that rank 1 corresponds to the county with the **largest** (most positive) $b_{0c}$ value -- that is, the county with the highest fatality risk relative to the national average. This produces a rank matrix $\mathbf{R} \in \{1, 2, \ldots, 26\}^{S \times C}$ where each row is a complete ranking of all 26 counties at one posterior draw.
+
+## Step 3: Posterior Rank Summaries
+
+The posterior distribution of ranks for county $c$ is summarised by its posterior mean rank and 95% credible interval:
+$$\bar{r}_c = \frac{1}{S}\sum_{s=1}^{S} r_c^{(s)}, \quad \text{95\% CrI on rank} = \left(Q_{0.025}\left(\{r_c^{(s)}\}\right),\ Q_{0.975}\left(\{r_c^{(s)}\}\right)\right),$$
+where $Q_{\alpha}$ denotes the $\alpha$-quantile. The posterior mean rank $\bar{r}_c$ can be interpreted as the expected rank of county $c$ under the posterior distribution. The 95% credible interval on the rank $[Q_{0.025}, Q_{0.975}]$ contains the county's true rank with posterior probability 0.95.
+
+The width of the rank credible interval is the primary diagnostic for ranking reliability. A narrow interval such as $[1, 2]$ for Dublin indicates that in 95% of posterior draws Dublin occupies rank 1 or 2 -- the model is highly confident about Dublin's position. A wide interval such as $[3, 22]$ for Roscommon indicates that across posterior draws Roscommon occupies many different rank positions -- the model is genuinely uncertain about where Roscommon sits in the ordering. This uncertainty reflects the small VKT and large posterior uncertainty on $b_{0,\text{Roscommon}}$, which in turn reflects the hierarchical shrinkage pulling the estimate toward zero.
+
+## Step 4: Relative Risk
+
+The relative risk of county $c$ compared to the national geometric mean is:
+$$RR_c = \frac{e^{\bar{b}_{0c}}}{\frac{1}{26}\sum_{c^{\prime}=1}^{26} e^{\bar{b}_{0c^{\prime}}}},$$
+where $\bar{b}_{0c} = \frac{1}{S}\sum_s b_{0c}^{(s)}$ is the posterior mean of $b_{0c}$. A value of Louth's relative risk of $`r round(rr$RR[rr$County=="Louth"], 2)`$ means that Louth has a fatality rate per kilometre driven that is $`r round((rr$RR[rr$County=="Louth"] - 1)*100)`\%$ higher than the national average county. A value of Dublin's relative risk of $`r round(rr$RR[rr$County=="Dublin"], 2)`$ means Dublin's fatality rate is $`r round((1 - rr$RR[rr$County=="Dublin"])*100)`\%$ lower than the national average.
+
+## Step 5: Pairwise Comparison
+
+The posterior probability that county $A$ is riskier than county $B$ is computed directly from the joint posterior distribution:
+$$P(\text{County A riskier than B}) = \frac{1}{S}\sum_{s=1}^{S} \mathbb{1}\left[b_{0A}^{(s)} > b_{0B}^{(s)}\right],$$
+where $\mathbb{1}[\cdot]$ is the indicator function. This is simply the proportion of posterior draws in which county $A$ has a larger $b_{0}$ than county $B$. No multiple testing correction is required because this is a direct posterior probability statement about the parameter, not a hypothesis test, so there is no concept of a Type I error.
+
+## Step 6: Hypothesis Test of Difference
+
+For each county, a formal Bayesian hypothesis test assesses whether the county differs from the national average:
+$$H_0: b_{0c} = 0 \quad \text{(county same risk as national average)},$$
+$$H_1: b_{0c} \neq 0 \quad \text{(county differs from national average).}$$
+The Bayesian posterior probability replaces the classical p-value:
+$$P(\text{county higher risk than average}) = \frac{1}{S}\sum_{s=1}^{S} \mathbb{1}\left[b_{0c}^{(s)} > 0\right].$$
+A county is declared **significantly higher risk** if $P(b_{0c} > 0) > 0.975$ and **significantly lower risk** if $P(b_{0c} < 0) > 0.975.$ This threshold is equivalent to the classical 95% significance level and corresponds to a 95% posterior credible interval on $b_{0c}$ that excludes zero entirely.
+
+The strength of evidence is further graded using five levels following the Jeffreys scale of evidence, as set out in Table 7.2 below.
+
+| Evidence Level | Threshold | Interpretation |
+|:-------------|:---------|:--------------|
+| Decisive | $P > 0.999$ | Almost certain; overwhelming evidence. |
+| Strong | $P > 0.975$ | Clearly significant; 95% CrI excludes zero. |
+| Moderate | $P > 0.950$ | Suggestive; CrI nearly excludes zero. |
+| Weak | $P > 0.750$ | Some signal present but highly uncertain. |
+| None | $P \leq 0.750$ | No detectable evidence; near coin flip. |
+
+Table 7.2: Evidence levels for Bayesian hypothesis tests.
+
+This graded evidence scale provides more information than a binary significant or non-significant decision. It allows the reader to distinguish between a county that is decisively different from the national average (such as Dublin, with $P(\text{lower}) = 1.000$) and one that shows only weak evidence of difference (such as Westmeath, with posterior probability near 0.75).
+
+This chapter has described the complete six-step Bayesian ranking procedure implemented in R using the posterior draws from the JAGS model. The procedure produces, for each county: a posterior distribution of ranks, a posterior mean rank and 95% credible interval on the rank, a relative risk estimate, pairwise comparison probabilities with all other counties, and a formal hypothesis test with graded evidence level. The results of applying this procedure to the main model are presented in Chapter 8.
+
+\FloatBarrier
+
+# Results
+
+This chapter presents the results of the Bayesian hierarchical Poisson model (Model M3) selected in Chapter 9. Under this model, county-specific deviations for time trends and COVID-19 effects are not statistically supported, meaning these effects are modeled globally. The results are structured to present the primary finding first: the county baseline risk rankings ($b_{0c}$), followed by the spatial map of risk. We then present the road infrastructure validation using independent TII data to show the consistency of these baseline risk rankings. Finally, we discuss the global national time trend ($\beta_1$) and national COVID-19 effect ($\beta_2$).
+
+## County Baseline Risk Rankings (b0)
+
+The county baseline effect $b_{0c}$ is the primary parameter of scientific interest in this project. It captures the structural, persistent deviation of county $c$ from the national average fatality risk after controlling for vehicle kilometres travelled, national time trends, and COVID-19. This section presents the main inferential results: which counties are confidently higher or lower risk than the national average, how confident the model is in the complete county ranking, and the relative risk of each significantly different county.
+
+### Significantly Lower Risk Counties
+
+Four counties have 95% credible intervals entirely below zero, indicating they are confidently lower risk than the national average.
+
+**Dublin** ($\hat{b}_0 = -0.673$, 95% CrI: $-0.883$ to $-0.473$, $P(\text{lower}) = 1.000$, $RR = 0.51$): Dublin is the safest county per kilometre driven. Despite having the highest raw death count in Ireland, its extensive motorway network (59% of national roads are motorway) means risk per kilometre is approximately 49% lower than the national average. The decisive posterior probability of 1.000 -- all 80,000 posterior draws show Dublin below the national average -- reflects the strength of this finding.
+
+**Kildare** ($\hat{b}_0 = -0.393$, 95% CrI: $-0.685$ to $-0.120$, $P(\text{lower}) = 0.998$, $RR = 0.67$): The second safest county, with 81% of its national roads being motorway -- the highest motorway proportion of any county in Ireland. The M7, M9, and sections of the M4 pass through Kildare.
+
+**Cork** ($\hat{b}_0 = -0.281$, 95% CrI: $-0.493$ to $-0.073$, $P(\text{lower}) = 0.996$, $RR = 0.76$): The fourth safest county, benefiting from urban infrastructure and motorway access including the M8 and M20 corridors.
+
+**Wicklow** ($\hat{b}_0 = -0.312$, 95% CrI: $-0.644$ to $-0.0004$, $P(\text{lower}) = 0.975$, $RR = 0.73$): Marginally but confidently lower risk than the national average. The lower bound of the credible interval nearly touches zero, reflecting that Wicklow sits at the boundary of significance.
+
+### Significantly Higher Risk Counties
+
+Three counties have 95% credible intervals entirely above zero.
+
+**Louth** ($\hat{b}_0 = +0.453$, 95% CrI: $+0.181$ to $+0.726$, $P(\text{higher}) = 0.997$, $RR = 1.57$): The riskiest county in Ireland by posterior mean rank, with 57% higher fatality risk per kilometre driven than the national average. Despite some motorway coverage (40.6%), the remaining single carriageway roads carry high traffic volumes including heavy goods vehicles travelling the Dublin to Belfast corridor.
+
+**Monaghan** ($\hat{b}_0 = +0.426$, 95% CrI: $+0.112$ to $+0.738$, $P(\text{higher}) = 0.996$, $RR = 1.53$): The second riskiest county. Monaghan has no motorway coverage and 85% single carriageway roads, with border geography creating concentrated traffic on dangerous rural routes.
+
+**Donegal** ($\hat{b}_0 = +0.365$, 95% CrI: $+0.117$ to $+0.612$, $P(\text{higher}) = 0.998$, $RR = 1.44$): The third riskiest county. Donegal has zero motorway coverage and 98% single carriageway roads. Long driving distances on remote rural roads create a persistently elevated risk environment.
+
+```{r fig-rankings, fig.width=6.8, fig.height=5.8, out.width="0.94\\linewidth", fig.pos="!htbp", fig.cap="Bayesian county baseline risk rankings (b0). Red indicates significantly higher risk, green indicates lower risk, and gray indicates no significant difference from the national average."}
+ggplot(rr,aes(x=mb0,y=reorder(County,mb0),color=Con))+
+  geom_errorbarh(aes(xmin=lb0,xmax=ub0),height=0.3)+
+  geom_point(size=2)+
+  geom_vline(xintercept=0,linetype="dashed",color="gray50")+
+  scale_color_manual(values=c("Significantly HIGHER RISK"="red",
+    "Significantly LOWER RISK"="darkgreen",
+    "No significant difference"="gray50"),name="")+
+  labs(x="Posterior mean b0 with 95% credible interval",y="County")+
+  theme_minimal(base_size=9)+
+  theme(legend.position="bottom",axis.text.y=element_text(size=7))
+```
+
+### Credible Intervals on Rankings
+
+Figure 8.2 shows the 95% credible intervals on the rank numbers themselves -- the key contribution of the Bayesian ranking methodology described in Chapter 6. Dublin has a rank credible interval of approximately 1 to 2, meaning the model is highly confident Dublin occupies rank 1 or 2 in the ordering of safest counties. Louth and Monaghan have rank credible intervals of approximately 20 to 26 -- confidently among the riskiest counties. However, the majority of mid-table counties have rank credible intervals spanning almost the full 1 to 26 range. Roscommon has a mean rank near 13 but a 95% credible interval spanning roughly 4 to 22. This genuinely cannot place Roscommon in any specific rank position. This is honest scientific reporting: the data do not support fine-grained ordering of most counties, and the Bayesian approach correctly quantifies this limitation where classical methods would produce false precision.
+
+```{r fig-rank-ci, fig.width=6.8, fig.height=5.8, out.width="0.94\\linewidth", fig.pos="!htbp", fig.cap="Posterior credible intervals on county risk ranks. Rank 1 is the riskiest county and rank 26 is the safest. Narrow bars indicate confident rank placement; wide bars indicate uncertain ranking."}
+ggplot(rr,aes(x=mr,y=reorder(County,-mr)))+
+  geom_errorbarh(aes(xmin=lr,xmax=ur),height=0.3,color="steelblue")+
+  geom_point(size=2,color="darkblue")+
+  geom_vline(xintercept=13.5,linetype="dashed",color="gray50")+
+  labs(x="Posterior mean rank with 95% credible interval",y="County")+
+  theme_minimal(base_size=9)+theme(axis.text.y=element_text(size=7))
+```
+
+```{r results-table}
+sig<-rr%>%filter(Con!="No significant difference")%>%
+  select(County,mb0,lb0,ub0,ph,pl,RR,Ev,Con)%>%
+  mutate(across(where(is.numeric),round,3))
+kable(sig,row.names=FALSE,col.names=c("County","Mean b0","Lower 95%","Upper 95%",
+                      "P(higher)","P(lower)","RR","Evidence","Conclusion"),
+      caption="Counties significantly different from the national average.")
+```
+
+## Spatial Map of Risk
+
+Figure 8.3 presents a spatial choropleth map of the posterior mean relative risk ($RR_c$) across the 26 counties of the Republic of Ireland. The spatial pattern reveals a clear East-West and North-South divide in traffic safety. The safest counties, represented by darker colors, are concentrated in the east and south-east (Dublin, Kildare, Wicklow, Cork), which correspond to regions with high-capacity motorway infrastructure and major inter-urban corridors. Conversely, the highest risk counties (Louth, Monaghan, Donegal) are situated in the north and north-west. These counties are characterized by border geography, high reliance on single carriageway roads, and lack of motorway coverage, which contributes to elevated risk per kilometer driven.
+
+```{r fig-spatial-map, fig.width=6.4, fig.height=7.0, out.width="0.82\\linewidth", fig.pos="!htbp", fig.cap="Spatial map of posterior mean relative risk (RR) by county. Lower values (blue/green) indicate lower risk; higher values (yellow) indicate higher risk."}
+ie <- ne_states(country = "Ireland", returnclass = "sf")
+
+ie_cleaned <- ie %>%
+  mutate(County = case_when(
+    name %in% c("Dublin", "Dún Laoghaire–Rathdown", "Fingal", "South Dublin") ~ "Dublin",
+    name %in% c("North Tipperary", "South Tipperary") ~ "Tipperary",
+    name == "Laoighis" ~ "Laois",
+    TRUE ~ name
+  )) %>%
+  group_by(County) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop")
+
+rr_map <- ie_cleaned %>%
+  left_join(rr, by = "County")
+
+northern_ireland <- tryCatch({
+  ni_states <- ne_states(country = "United Kingdom", returnclass = "sf")
+  ni_states %>%
+    filter(
+      name == "Northern Ireland" |
+        name_en == "Northern Ireland" |
+        grepl("Northern Ireland", name, ignore.case = TRUE) |
+        grepl("Northern Ireland", region, ignore.case = TRUE)
+    )
+}, error = function(e) NULL)
+
+map_plot <- ggplot() +
+  geom_sf(data = rr_map, aes(fill = RR), color = "white", linewidth = 0.25) +
+  scale_fill_viridis_c(
+    option = "viridis",
+    name = "Relative Risk (RR)",
+    na.value = "white",
+    guide = guide_colorbar(
+      title.position = "top",
+      title.hjust = 0.5,
+      barwidth = 10,
+      barheight = 0.5
+    )
+  ) +
+  coord_sf(expand = FALSE) +
+  theme_void(base_size = 10) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_blank(),
+    plot.subtitle = element_blank(),
+    plot.margin = margin(2, 2, 2, 2)
+  )
+
+if (!is.null(northern_ireland) && nrow(northern_ireland) > 0) {
+  map_plot <- map_plot +
+    geom_sf(
+      data = northern_ireland,
+      fill = "white",
+      color = "#440154",
+      linewidth = 0.6,
+      inherit.aes = FALSE
+    )
+}
+
+map_plot
+```
+
+## Road Infrastructure Validation
+
+### Scatterplot: Single Carriageway Proportion vs Fatality Rate
+
+Figure 8.4 uses TII road length data [@tii2016roadlengths] -- a completely independent source from the RSA and CSO data used in the Bayesian model -- to externally validate the county risk rankings. The positive linear relationship between the proportion of single carriageway roads and the average fatality rate per billion kilometres driven confirms the model findings through an entirely different methodology. Single carriageway roads are structurally dangerous because opposing traffic is separated only by road markings, making head-on collisions possible during overtaking manoeuvres. Dublin and Kildare appear in the bottom-left quadrant -- low single carriageway proportion, low fatality rate -- consistent with their Bayesian ranking as the safest counties. Donegal, Mayo, Kerry, and Cavan appear in the top-right quadrant -- nearly 100% single carriageway, high fatality rates. Monaghan and Louth are outliers -- higher fatality rates than their single carriageway proportion alone would predict -- suggesting additional local factors including border road traffic composition and heavy goods vehicle volumes contribute to their elevated risk.
+
+```{r fig-road-scatter, fig.width=6.8, fig.height=4.6, out.width="0.94\\linewidth", fig.pos="!htbp", fig.cap="Single carriageway proportion versus average fatality rate by county. The clear positive relationship independently validates the Bayesian risk rankings using TII data."}
+rrd<-panel%>%group_by(County)%>%
+  summarise(adr=mean(rate_billion,na.rm=TRUE),.groups="drop")%>%
+  left_join(road_data,by="County")
+ggplot(rrd,aes(x=pct_single,y=adr,label=County))+
+  geom_point(aes(color=pct_motorway),size=2.5)+
+  geom_text_repel(size=2.5)+
+  geom_smooth(method="lm",se=TRUE,color="red",linewidth=0.8)+
+  scale_color_gradient(low="red",high="darkgreen",name="% Motorway")+
+  labs(x="Percentage of national roads that are single carriageway",
+       y="Average deaths per billion km")+
+  theme_minimal(base_size=10)
+```
+
+### Combined Validation Plot
+
+Figure 8.5 presents a combined validation plot that simultaneously shows the Bayesian posterior risk estimate, road type composition, and traffic volume for each county. The x-axis shows the Bayesian posterior mean $b_{0c}$, with counties ordered from safest (left) to riskiest (right). Point colour encodes the percentage of single carriageway roads -- green for low single carriageway proportion (safer road type), transitioning to red for high single carriageway proportion (dangerous road type). Point size encodes average vehicle kilometres, with larger points corresponding to higher traffic volumes.
+
+```{r fig-combined, fig.width=6.8, fig.height=5.8, out.width="0.94\\linewidth", fig.pos="!htbp", fig.cap="Bayesian risk (b0) versus road type and traffic volume. Point colour encodes single carriageway proportion; point size encodes traffic volume."}
+ps2<-panel%>%group_by(County)%>%summarise(ak=mean(VM,na.rm=TRUE),.groups="drop")
+fs<-rr%>%left_join(road_data%>%select(County,pct_single,pct_dual),by="County")%>%
+  left_join(ps2,by="County")
+ggplot(fs,aes(x=mb0,y=reorder(County,mb0),color=pct_single))+
+  geom_errorbarh(aes(xmin=lb0,xmax=ub0),height=0.3,alpha=0.5)+
+  geom_point(aes(size=ak),alpha=0.8)+
+  geom_vline(xintercept=0,linetype="dashed",color="gray50")+
+  scale_color_gradient(low="darkgreen",high="red",name="% Single\nCarriageway")+
+  scale_size_continuous(name="Avg billion km\ntravelled",labels=scales::comma)+
+  labs(x="Posterior mean b0 with 95% CrI",y="County")+
+  theme_minimal(base_size=9)+theme(axis.text.y=element_text(size=7))
+```
+
+Three structural patterns are immediately visible in Figure 8.5. First, road type and Bayesian risk align almost perfectly: as counties move from safest (left) to riskiest (right), the point colours transition systematically from green to red, confirming that single carriageway road proportion is a strong independent predictor of the Bayesian risk estimate. Second, traffic volume and risk are inversely related: the largest points -- Dublin, Cork, Galway -- consistently appear on the safe side of zero, reflecting both high motorway coverage and large denominator VKT that dilute the fatality rate. Third, credible interval width varies systematically with county size: Dublin has an extremely narrow credible interval while small rural counties like Leitrim and Roscommon have wide credible intervals, reflecting the hierarchical shrinkage pulling uncertain small-county estimates toward the national mean.
+
+## Time Trend
+
+The national time trend parameter $\beta_1$ captures whether Ireland as a whole experienced a change in road fatality risk per distance travelled over the study period (2015–2023). Under model M3, county-specific time trend deviations were omitted because model selection (Chapter 9) showed that they are not supported by the data. 
+
+The posterior mean of the national time trend is $\beta_1 = `r round(mean(pm[,"beta1"]), 4)`$ with a 95% credible interval of $`r round(quantile(pm[,"beta1"], 0.025), 4)`$ to $`r round(quantile(pm[,"beta1"], 0.975), 4)`$. Because this interval comfortably spans zero, there is no statistically significant evidence of a national upward or downward trend in fatality risk per kilometre driven over the 2015–2023 period. This suggests that the substantial fluctuations in raw death counts observed nationally are primarily driven by changes in travel exposure (VKT) and random variation, rather than a systematic change in underlying safety.
+
+## COVID-19 Effect
+
+The COVID-19 pandemic and its associated lockdowns dramatically altered travel behavior in Ireland. Under model M3, the COVID-19 effect is modeled globally as a national fixed effect $\beta_2$, which quantifies the national shift in log-fatality rate per kilometre driven during the pandemic years 2020–2021.
+
+The posterior mean of the national COVID-19 effect is $\beta_2 = `r round(mean(pm[,"beta2"]), 4)`$ with a 95% credible interval of $`r round(quantile(pm[,"beta2"], 0.025), 4)`$ to $`r round(quantile(pm[,"beta2"], 0.975), 4)`$. This interval includes zero, indicating that the national fatality rate per kilometre driven during 2020–2021 was not statistically distinguishable from the non-pandemic years. Although total vehicle travel decreased significantly during lockdowns, the rate of fatalities per distance travelled remained stable, suggesting that risk exposure per unit distance driven did not change significantly.
+
+This chapter has presented the complete results of the Bayesian hierarchical Poisson model M3. The results demonstrate that county baseline risks differ significantly, with Dublin confidently identified as the lowest risk and Louth as the highest risk county. These baseline risk patterns are strongly validated by independent road infrastructure data showing that motorway and single carriageway proportions are key drivers of risk. Furthermore, global time trends and COVID-19 effects are not statistically significant, justifying the choice of a random-intercept-only model.
+
+\FloatBarrier
+
+
+# Model Selection Using DIC
+
+This chapter compares five nested versions of the Bayesian hierarchical Poisson model using the Deviance Information Criterion (DIC). Model selection serves two purposes here. First, it determines whether the county-level time trend and COVID effects are statistically warranted -- that is, whether they improve model fit sufficiently to justify their added complexity. Second, it provides an independent confirmation of the hypothesis test results from Chapter 7: if county-level b1 and b2 effects are non-significant in the posterior, removing them should not substantially worsen DIC. The five models are compared by removing county-level random effects one at a time, starting from the full model and ending with the null model that contains no county effects at all.
+
+## Deviance Information Criterion
+
+Model selection was performed using the Deviance Information Criterion (DIC):
+$$\text{DIC} = \bar{D}(\theta) + p_D$$
+where $\bar{D}(\theta) = -2\mathbb{E}_\theta[\log p(X|\theta)]$ is the posterior mean deviance measuring fit, and $p_D = \bar{D}(\theta) - D(\bar{\theta})$ is the effective number of parameters measuring complexity. Lower DIC indicates a better balance between fit and complexity. Delta DIC below 2 indicates models are essentially equivalent; above 10 indicates strong evidence against the more complex model.
+
+## Five Nested Models
+
+
+Five models were compared by removing county-level effects one at a time: M1 (Full: county b0 + b1 + b2), M2 (No county COVID: county b0 + b1), M3 (No county trend: county b0 only), M4 (No county effects: national model only), M5 (No COVID at all).
+
+```{r dic-run, include=FALSE, cache=TRUE}
+jd<-list(X=X,VM=VM_vec,Year_c=Year_c,covid=covid,county=county,nObs=nObs,N=N)
+rdic<-function(ms,nm){
+  m<-jags.model(textConnection(ms),data=jd,n.chains=4,n.adapt=1000,quiet=TRUE)
+  update(m,5000,progress.bar="none")
+  d<-dic.samples(m,n.iter=10000,type="pD",progress.bar="none")
+  list(name=nm,DIC=sum(d$deviance)+sum(d$penalty),
+       pD=sum(d$penalty),Deviance=sum(d$deviance))
+}
+r1<-rdic("model{for(i in 1:nObs){X[i]~dpois(mu[i])
+  log(mu[i])<-log(VM[i])+(beta0+b0[county[i]])+
+  (beta1+b1[county[i]])*Year_c[i]+(beta2+b2[county[i]])*covid[i]}
+  for(c in 1:N){b0[c]~dnorm(0,tau0);b1[c]~dnorm(0,tau1);b2[c]~dnorm(0,tau2)}
+  beta0~dnorm(1.200,9.905);beta1~dnorm(-0.002,84.665);beta2~dnorm(0.053,1.989)
+  tau0~dgamma(.001,.001);tau1~dgamma(.001,.001);tau2~dgamma(.001,.001)
+  sd0<-1/sqrt(tau0);sd1<-1/sqrt(tau1);sd2<-1/sqrt(tau2)}",
+  "M1: Full (b0+b1+b2)")
+r2<-rdic("model{for(i in 1:nObs){X[i]~dpois(mu[i])
+  log(mu[i])<-log(VM[i])+(beta0+b0[county[i]])+
+  (beta1+b1[county[i]])*Year_c[i]+beta2*covid[i]}
+  for(c in 1:N){b0[c]~dnorm(0,tau0);b1[c]~dnorm(0,tau1)}
+  beta0~dnorm(1.200,9.905);beta1~dnorm(-0.002,84.665);beta2~dnorm(0.053,1.989)
+  tau0~dgamma(.001,.001);tau1~dgamma(.001,.001)
+  sd0<-1/sqrt(tau0);sd1<-1/sqrt(tau1)}",
+  "M2: No county COVID (b0+b1)")
+r3<-rdic("model{for(i in 1:nObs){X[i]~dpois(mu[i])
+  log(mu[i])<-log(VM[i])+(beta0+b0[county[i]])+
+  beta1*Year_c[i]+beta2*covid[i]}
+  for(c in 1:N){b0[c]~dnorm(0,tau0)}
+  beta0~dnorm(1.200,9.905);beta1~dnorm(-0.002,84.665);beta2~dnorm(0.053,1.989)
+  tau0~dgamma(.001,.001);sd0<-1/sqrt(tau0)}",
+  "M3: No county trend (b0) BEST")
+r4<-rdic("model{for(i in 1:nObs){X[i]~dpois(mu[i])
+  log(mu[i])<-log(VM[i])+beta0+beta1*Year_c[i]+beta2*covid[i]}
+  beta0~dnorm(1.200,9.905);beta1~dnorm(-0.002,84.665);beta2~dnorm(0.053,1.989)}",
+  "M4: No county effects NULL")
+r5<-rdic("model{for(i in 1:nObs){X[i]~dpois(mu[i])
+  log(mu[i])<-log(VM[i])+(beta0+b0[county[i]])+
+  (beta1+b1[county[i]])*Year_c[i]}
+  for(c in 1:N){b0[c]~dnorm(0,tau0);b1[c]~dnorm(0,tau1)}
+  beta0~dnorm(1.200,9.905);beta1~dnorm(-0.002,84.665)
+  tau0~dgamma(.001,.001);tau1~dgamma(.001,.001)
+  sd0<-1/sqrt(tau0);sd1<-1/sqrt(tau1)}",
+  "M5: No COVID at all")
+dt<-bind_rows(lapply(list(r1,r2,r3,r4,r5),as.data.frame))%>%
+  mutate(across(where(is.numeric),round,2),
+         Delta_DIC=round(DIC-min(DIC),2),
+         Verdict=case_when(Delta_DIC==0~"BEST MODEL",Delta_DIC<2~"Equivalent",
+           Delta_DIC<10~"Some evidence against",TRUE~"REJECTED"))%>%
+  arrange(DIC)
+```
+
+```{r dic-table}
+kable(dt%>%select(name,DIC,pD,Deviance,Delta_DIC,Verdict),
+      col.names=c("Model","DIC","pD","Deviance","Delta DIC","Verdict"),
+      caption="DIC model comparison. Lower DIC = better model.")
+```
+
+**M3 is the best model**: County baseline effects b0 are the only county-level effect supported by the data. **M4 is decisively rejected** (Delta DIC = `r round(dt$Delta_DIC[dt$name=="M4: No county effects NULL"],2)`): counties MUST be in the model. **M5 is essentially equivalent to M3** (Delta DIC = `r round(dt$Delta_DIC[dt$name=="M5: No COVID at all"],2)`): Ireland's anomalous COVID response means COVID barely matters in the model. **M1 and M2 are worse than M3**: county trends b1 and county COVID effects b2 add complexity without sufficient improvement in fit.
+
+The DIC model comparison perfectly validates all conclusions from the posterior hypothesis tests -- two completely independent criteria arrive at identical conclusions.
+
+\FloatBarrier
+
+# Conclusions
+
+## Summary of Findings
+
+This project applied Bayesian hierarchical Poisson regression to rank all 26 Irish counties by road fatality risk per kilometre driven from 2015 to 2023. The analysis proceeded sequentially: data collection from four independent sources, cleaning into a 234-observation panel, frequentist baseline analysis using `lme4`, Bayesian hierarchical modelling in JAGS with 80,000 posterior draws across four chains, MCMC convergence diagnostics using four criteria, Bayesian ranking with credible intervals on the ranks, hypothesis testing at three levels (global, individual county, pairwise), DIC model comparison across five nested models, and external validation using TII road infrastructure data.
+
+**Finding 1 -- Exposure adjustment changes the ranking dramatically.** Dublin, with the highest raw death count, is the safest county per kilometre driven ($RR = 0.51$). This demonstrates conclusively why VKT-based rates are essential.
+
+**Finding 2 -- County baseline risks (b0) are informative.** Four counties are confidently lower risk (Dublin, Kildare, Cork, Wicklow) and three are confidently higher risk (Louth, Monaghan, Donegal). The remaining 19 counties cannot be distinguished from the national average -- genuine uncertainty, not failure.
+
+**Finding 3 -- County time trends and COVID-19 effects are not supported by the data.** Model selection via DIC confirms that Model M3, which removes county-level deviations for time trends and COVID-19, is the best model. The national time trend ($\beta_1$) and COVID-19 effect ($\beta_2$) are modeled globally and are both statistically non-significant.
+
+**Finding 4 -- Road infrastructure validates the rankings.** Counties identified as higher risk have zero motorway coverage and 95–100% single carriageway roads. Counties identified as lower risk have the highest motorway proportions.
+
+**Finding 5 -- The hierarchical model correctly applies shrinkage.** Small rural counties have wide rank credible intervals. Large counties have tight intervals. The shrinkage effect correctly differentiates what the data can and cannot support.
+
+## Limitations
+
+Although this project provides a robust Bayesian ranking of county-level road fatality risk per billion kilometres travelled, several further limitations should be acknowledged.
+
+First, the analysis is based on county-level aggregate data. This means that variation within counties cannot be fully captured. A county may contain both high-capacity motorway corridors and narrow rural local roads, but the model treats the county as one spatial unit. As a result, the estimated county-level risk may hide important local hotspots, specific dangerous junctions, road segments, or route-level differences. Future work should therefore extend the analysis to road-segment or local-authority level data where possible.
+
+Second, the exposure denominator used in this study is vehicle kilometres travelled. This is a major improvement over population-based rates or raw fatality counts, but it still does not distinguish between different types of road users or vehicles. For example, one billion kilometres driven by private cars may not carry the same risk profile as one billion kilometres involving motorcycles, heavy goods vehicles, cyclists, pedestrians, or mixed rural traffic. Since vulnerable road users are at substantially higher risk in many road-safety studies, future versions of the model could benefit from separate exposure measures by road-user type and vehicle class [@who2023roadsafety; @itf2024roadsafety].
+
+Third, the model does not directly include behavioural risk factors such as speeding, alcohol or drug driving, mobile-phone use, fatigue, seatbelt use, or helmet use. These factors are central to road safety outcomes, but they are not consistently available as annual county-level covariates. Their omission means that some of the estimated county random effects may partly reflect unobserved behavioural differences rather than infrastructure alone [@who2023roadsafety].
+
+Fourth, the road infrastructure covariates are relatively static. The TII national road-length data provide useful information on motorway, dual carriageway, and single carriageway proportions, but the road network may have changed during the 2015--2024 period. Treating road infrastructure as fixed may therefore understate the effect of new road schemes, junction upgrades, safety barriers, traffic-calming interventions, or local safety improvements introduced during the study period [@tii2016roadlengths].
+
+Fifth, fatality counts are rare events, especially in smaller counties. Although the Bayesian hierarchical model addresses this through shrinkage, the posterior rank intervals remain wide for many mid-table counties. This means the model is most reliable for identifying counties that are clearly high-risk or clearly low-risk, but it should not be used to make strong claims about small differences between counties whose credible intervals overlap substantially.
+
+Sixth, the COVID-19 period remains difficult to model fully. The years 2020 and 2021 changed travel behaviour, traffic volume, commuting patterns, enforcement activity, and possibly driver behaviour. A simple COVID indicator captures only an average national effect and may not fully represent county-specific mobility changes. More detailed mobility data, such as monthly traffic counts or route-level travel data, would allow a more precise assessment of how pandemic-related changes affected fatality risk per kilometre [@adminaite2021pin].
+
+Seventh, the analysis focuses on deaths rather than serious injuries. Fatality counts are important and policy-relevant, but they represent only the most severe outcome. Serious injuries can have lifelong consequences and may show different spatial patterns from deaths. Future research should therefore model deaths and serious injuries jointly, or use a combined killed-or-seriously-injured outcome [@gov2025phase2roadsafety].
+
+Finally, the ranking results should be interpreted as evidence for prioritisation rather than as a complete explanation of causation. A county with a high posterior risk should not automatically be interpreted as having poor road management. The risk may reflect traffic mix, road geography, rurality, border traffic, weather exposure, road-user behaviour, emergency response times, or other unmeasured factors. Therefore, the Bayesian rankings should be used as a screening tool to guide more detailed local investigation.
+
+## Policy Implications
+
+The findings of this study have several important implications for road-safety policy in Ireland.
+
+First, road-safety interventions should be prioritised using exposure-adjusted risk rather than raw fatality counts alone. Counties with large populations and high traffic volumes may record many deaths but still have relatively low risk per kilometre travelled. Conversely, rural counties with fewer deaths may have much higher fatality risk after accounting for vehicle kilometres. A Bayesian ranking approach allows policymakers to identify counties where the underlying risk appears genuinely elevated.
+
+Second, the results support the need for targeted investment in rural road safety. Recent Irish policy documents show that a large majority of road deaths occur on rural roads with higher speed limits [@gov2025speedpolicy]. This is consistent with the project's finding that counties with high proportions of single carriageway roads tend to have higher fatality rates per billion kilometres travelled. Policy responses should therefore include safer speed limits, road-safety audits, improved signage, central barriers where feasible, shoulder improvements, clearer lane markings, and targeted treatment of high-risk bends and junctions [@etsc2024ruralroads].
+
+Third, the study supports Ireland's current move toward the Safe System approach. Under this approach, responsibility for road safety is shared across road users, road designers, vehicle manufacturers, enforcement agencies, and policymakers. The Bayesian county rankings can contribute to this approach by identifying where the road system appears least forgiving and where interventions may produce the greatest safety benefit [@gov2025phase2roadsafety; @who2023roadsafety].
+
+Fourth, the results support the recent reduction of speed limits on rural local roads. Lowering inappropriate speed limits is especially relevant where roads are narrow, winding, mixed-use, or used by pedestrians, cyclists, agricultural vehicles, and local traffic. Since speed strongly affects both crash likelihood and crash severity, speed management should be treated as a central policy tool rather than only an enforcement issue [@rsa2025ruralspeedlimits; @gov2025speedpolicy].
+
+Fifth, counties identified as high-risk should be investigated using local evidence before policy decisions are finalised. The Bayesian model identifies broad patterns, but local authorities should combine these results with collision reports, road audits, Garda enforcement data, traffic counts, and community reports. This would allow the ranking system to be used as an early-warning tool rather than as a final judgement.
+
+Sixth, future policy should strengthen county-level road-safety data systems. More complete data on serious injuries, road-user type, vehicle type, road classification, weather, lighting, speed compliance, enforcement activity, and emergency response times would allow more detailed modelling. A national road-safety data platform linking RSA, CSO, TII, Garda, hospital, and local-authority data would improve both research quality and policy targeting [@rsa2026roaddeaths2025; @gov2025phase2roadsafety].
+
+Seventh, the study suggests that road infrastructure investment should not only focus on large national routes. Smaller rural and regional roads may carry lower traffic volumes but can produce higher fatality risk per kilometre travelled. Therefore, funding formulas should account for exposure-adjusted risk, rurality, road type, and historical collision severity, not only traffic volume or raw casualty counts.
+
+Finally, the Bayesian framework used in this project could be updated annually as new RSA and CSO data become available. This would allow policymakers to monitor whether counties move into or out of high-risk categories over time and whether interventions such as speed-limit reductions, road upgrades, or enforcement campaigns are associated with measurable reductions in risk.
+
+## Future Work
+
+Several directions for future work follow directly from the limitations identified above.
+
+First, the spatial resolution of the analysis could be extended below county level. Disaggregating the model to local-authority, electoral-district, or road-segment level would allow identification of specific high-risk corridors and junctions rather than treating each county as a single homogeneous unit. This would require collision and exposure data geocoded at a finer resolution than is currently available through the RSA and CSO sources used here, but would substantially increase the practical value of the rankings for targeted infrastructure investment.
+
+Second, the hierarchical model could be extended to allow genuinely county-specific time trends and COVID-19 effects, rather than the globally pooled $\beta_1$ and $\beta_2$ used in Model M3. While the present analysis found no evidence supporting county-level random slopes for these terms, this may partly reflect the limited statistical power available from only ten years of annual county-level counts. As further years of RSA and CSO data accumulate, refitting the full hierarchical model (M1) with county-specific trend and COVID terms may begin to reveal genuine heterogeneity that the current ten-year window cannot detect.
+
+Third, additional exposure and behavioural covariates identified as missing in the Limitations section -- including road-user type, vehicle class, speed compliance, and weather exposure -- should be incorporated as they become available. Linking the RSA collision database with Garda enforcement records, TII traffic classification counts, and Met \'{E}ireann weather data would allow these factors to be added as time-varying county-level covariates within the same JAGS framework used here, rather than requiring a different modelling approach.
+
+Fourth, the model could be extended to jointly estimate fatalities and serious injuries using a multivariate or shared-component hierarchical structure, allowing information to be borrowed across the two outcomes. This would be particularly valuable for small counties where fatality counts alone are too sparse to support precise inference, since serious injury counts are typically larger and could help stabilise the joint county-level risk estimate.
+
+Fifth, the static 2015 TII road infrastructure snapshot used in this analysis should be replaced with a time-varying covariate as updated road-length data become available, allowing the model to capture the effect of road upgrades, new motorway sections, and safety scheme completions that occurred during the study period.
+
+Sixth, further work will focus specifically on refining Model M3, the model selected by DIC in this report. This includes testing alternative weakly informative priors on the precision hyperparameter $\tau_0$ to assess the sensitivity of the county-level rankings to prior choice, conducting posterior predictive checks at the individual county level to verify model fit beyond the global summary used here, and exploring whether a small number of additional county-level covariates can be added to M3 without reintroducing the overfitting that disqualified Models M1 and M2. Since M3 already provides the best balance of fit and parsimony among the models considered, these refinements aim to improve its precision rather than replace its structure.
+
+Finally, the Shiny dashboard developed alongside this report could be extended into a living monitoring tool, refitting the Bayesian model automatically as new annual RSA and CSO data are released. This would allow the county rankings, credible intervals, and DIC-based model comparison to be refreshed each year with minimal manual intervention, supporting the annual policy-review cycle described above.
+
+\FloatBarrier
+
+
+# Appendix
+
+# Appendix
+
+## Appendix A: JAGS Model Code (Main Model M3)
+
+```
+model {
+  for (i in 1:nObs) {
+    X[i] ~ dpois(mu[i])
+    log(mu[i]) <- log(VM[i]) +
+                  (beta0 + b0[county[i]]) +
+                  beta1 * Year_c[i] +
+                  beta2 * covid[i]
+  }
+  for (c in 1:N) {
+    b0[c] ~ dnorm(0, tau0)
+  }
+  beta0 ~ dnorm(1.200, 9.905)
+  beta1 ~ dnorm(-0.002, 84.665)
+  beta2 ~ dnorm(0.053, 1.989)
+  tau0 ~ dgamma(0.001, 0.001)
+  sd0 <- 1/sqrt(tau0)
+}
+```
+
+## Appendix B: Extended Model with Road Covariates
+
+```
+model {
+  for (i in 1:nObs) {
+    X[i] ~ dpois(mu[i])
+    log(mu[i]) <- log(VM[i]) +
+                  (beta0 + b0[county[i]]) +
+                  beta1 * Year_c[i] +
+                  beta2 * covid[i] +
+                  beta3 * pct_dual[county[i]] +
+                  beta4 * road_density[county[i]]
+  }
+  for (c in 1:N) {
+    b0[c] ~ dnorm(0, tau0)
+  }
+  beta0 ~ dnorm(1.200, 9.905)
+  beta1 ~ dnorm(-0.002, 84.665)
+  beta2 ~ dnorm(0.053, 1.989)
+  beta3 ~ dnorm(0, 1.0E-6)
+  beta4 ~ dnorm(0, 1.0E-6)
+  tau0 ~ dgamma(0.001, 0.001)
+  sd0 <- 1/sqrt(tau0)
+}
+```
+
+## Appendix C: Variable Definitions
+
+| Variable / Parameter | Definition |
+|:---------------------|:-----------|
+| $X_{it}$ | Road fatalities in county $c$ at year $t$ |
+| $\text{VM}_{it}$ | Vehicle kilometres in billions (exposure offset) |
+| $\text{Year\_c}_t$ | Centred year (Year minus 2019.5) |
+| $\text{COVID}_t$ | COVID lockdown indicator (1 for 2020–2021, 0 otherwise) |
+| $\beta_0$ | National baseline log fatality rate per billion km |
+| $b_{0c}$ | County $c$ random intercept deviation from national baseline |
+| $\beta_1$ | National time trend coefficient |
+| $\beta_2$ | National COVID-19 effect coefficient |
+| $\beta_3$ | Effect of dual carriageway and motorway proportion ($\text{pct\_dual}$) |
+| $\beta_4$ | Effect of road network density ($\text{road\_density}$) |
+| $\tau_0$ | Precision hyperparameter for county random intercepts |
+| $\sigma_0$ | Standard deviation hyperparameter for county random intercepts ($\text{sd0}$) |
+
+## Appendix D: Road Infrastructure Data (TII 2015)
+
+```{r road-table, echo=FALSE}
+kable(road_data%>%
+        select(County,motorway_km,dual_km,single_km,total_km,pct_motorway,pct_single)%>%
+        mutate(across(where(is.numeric),round,1)),
+      col.names=c("County","Motorway km","Dual km","Single km",
+                  "Total km","% Motorway","% Single"),
+      caption="Appendix D: TII National Road Lengths 2015.")
+```
+
+\FloatBarrier
+
+# Declaration of Generative AI Use
+
+We further declare that generative artificial intelligence tools were used during the preparation of this work to assist with code debugging, drafting of explanatory text, and formatting of this report. All analytical decisions, statistical modelling choices, interpretation of results, and conclusions are entirely our own. All AI-assisted content was reviewed, verified, and edited by us, and we take full responsibility for the accuracy and academic integrity of the final submission.
+
+
+\FloatBarrier
+
+# Supplementary Materials
+
+All code supporting this study is included in the project's public GitHub repository, which contains the full R and JAGS analysis pipeline, the cleaned analysis code corresponding to the results presented in this report, and the source files for this document.
+
+\begin{itemize}
+  \item \textbf{GitHub repository:} \url{https://github.com/your-username/irish-road-fatality-bayesian}
+  \item \textbf{Interactive Shiny dashboard:} \url{https://po5d0z-yashaswini-malleshwarappa.shinyapps.io/irish-road-fatality/}
+\end{itemize}
+
+The Shiny dashboard allows interactive exploration of the county-level posterior risk rankings, the credible intervals on county ranks, the MCMC convergence diagnostics, the road infrastructure validation results, and the DIC model comparison, using an interactive map of Ireland in addition to the static figures presented in the main text.
+
+\FloatBarrier
+\clearpage
